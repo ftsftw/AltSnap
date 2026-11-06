@@ -1,0 +1,40 @@
+name: Linked Grid Windows x64 test ZIP
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/feat/linked-grid-resize'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Ubuntu MinGW-w64 packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y gcc-mingw-w64-x86-64-win32 binutils-mingw-w64-x86-64 make zip
+      - name: Run portable tests
+        run: make -C tests test
+      - name: Run ASan and UBSan
+        run: >-
+          make -C tests test BUILD_DIR=../work/linked-grid-sanitized
+          CFLAGS='-O1 -g -std=c99 -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer'
+      - name: Build complete Windows x64 application
+        run: >-
+          make -f MakefileX64 -j2
+          CC=x86_64-w64-mingw32-gcc-win32
+          WR=x86_64-w64-mingw32-windres
+      - name: Package and inspect portable ZIP
+        run: tests/package_linked_grid_win64.sh work/portable
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AltSnap-linked-grid-win64-test
+          path: work/portable/AltSnap-linked-grid-win64-test.zip
+          if-no-files-found: error
+          retention-days: 7
