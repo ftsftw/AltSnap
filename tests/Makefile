@@ -2,12 +2,14 @@ CC = cc
 CFLAGS = -O2 -std=c99 -Wall -Wextra -Werror -pedantic
 BUILD_DIR = ../work/linked-grid-tests
 BIN = $(BUILD_DIR)/linked_grid_test$(EXEEXT)
+RECOVERY = $(BUILD_DIR)/linked_grid_recovery_test$(EXEEXT)
 
 .PHONY: test build clean
 test: build
 	$(BIN)
+	$(RECOVERY)
 
-build: $(BIN)
+build: $(BIN) $(RECOVERY)
 
 $(BIN): linked_grid_test.c ../linked_grid.c ../linked_grid.h ../linked_grid_queue.h
 	mkdir -p $(BUILD_DIR)
@@ -15,3 +17,7 @@ $(BIN): linked_grid_test.c ../linked_grid.c ../linked_grid.h ../linked_grid_queu
 
 clean:
 	rm -f $(BIN)
+
+$(RECOVERY): linked_grid_recovery_test.c ../linked_grid_recovery.h ../linked_grid.h
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) linked_grid_recovery_test.c $(LDFLAGS) -o $@

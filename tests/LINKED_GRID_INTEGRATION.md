@@ -170,3 +170,31 @@ old wake/new generation replacement and ten thousand repeated move/finish cycles
 They exercise the production mailbox, not actual Win32 posting or hook timing.
 Windows GUI testing of hung participants, input latency, rapid Escape/reload,
 Alt-up and reentrant application behavior is still required.
+
+## Preview and recovery audit fixes
+
+The linked outline is now drawn directly from the pending active cell's visible
+DWM rectangle with MoveTransWinRaw. It no longer consults reused LastWin resize
+flags, sends WM_SIZING, or applies the legacy monitor DPI preview adjustment.
+The ordinary AltSnap preview still uses MoveTransWin. Cancellation, participant
+loss, and finish hide the linked outline; a generation check after moving its
+window prevents it from being shown again following reentrant cancellation.
+
+A failed or partially applied batch now checks each participant's original
+thread/process identity, DPI, visibility and DWM border, and compares its actual
+native rectangle with the last verified rectangle and requested rectangle.
+Only a participant at the requested rectangle is eligible for restoration.
+A third rectangle is treated as an external change and left untouched. The
+adapter tries a common batch only while all four identities remain valid; it
+then retries eligible survivors individually, rechecking identity, rectangle
+and generation before each SetWindowPos. Each attempt is verified, and the drag
+is frozen after any failed application. Cancellation stops further recovery.
+Win32 can still reject individual restores, change a window between checks, or
+reuse a handle with the same thread/process identity. Absolute atomicity is
+not guaranteed.
+
+The recovery policy has portable deterministic cases for failure and disappearance
+of every participant, third-party rectangle changes, partial restoration and
+refusal. They are policy tests, not a Windows GUI execution of DeferWindowPos,
+WM_SIZING, or DWM frame behavior. Real preview matching and rollback behavior
+still require Windows GUI verification.

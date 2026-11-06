@@ -2,6 +2,7 @@
    Private hooks.c adapter. All geometry is in physical screen coordinates,
    using DWM visible bounds with SnapGap=0. Never used for MDI. */
 #include "linked_grid.c"
+#include "linked_grid_recovery.h"
 static void ClearRestoreFlagOnResizeIfNeeded(HWND hwnd);
 
 static struct {
@@ -144,17 +145,89 @@ static int LinkedGridValid(void)
     return 1;
 }
 
-static int ApplyLinkedRects(const RECT *rects)
+static int ApplyLinkedRects(const RECT *rects, unsigned mask)
 {
     HDWP batch;
+    unsigned i, count = 0;
     if (!lg_queue_current(&linked_queue, linked_dispatch)) return 0;
-    batch = BeginDeferWindowPos(4);
-    unsigned i;
-    for (i = 0; batch && i < 4; ++i)
+    for (i = 0; i < 4; ++i) count += !!(mask & (1u << i));
+    if (!count) return 1;
+    batch = BeginDeferWindowPos(count);
+    for (i = 0; batch && i < 4; ++i) if (mask & (1u << i))
         batch = DeferWindowPos(batch, linked.hwnd[i], NULL, rects[i].left, rects[i].top,
                     rects[i].right - rects[i].left, rects[i].bottom - rects[i].top,
                     SWP_NOACTIVATE|SWP_NOZORDER|SWP_NOOWNERZORDER);
-    return batch && EndDeferWindowPos(batch);
+    return batch && lg_queue_current(&linked_queue, linked_dispatch)
+        && EndDeferWindowPos(batch);
+}
+
+static int LinkedParticipantIdentity(unsigned i)
+{
+    DWORD pid;
+    HWND hwnd = linked.hwnd[i];
+    DWORD tid = GetWindowThreadProcessId(hwnd, &pid);
+    RECT bd;
+    if (!tid || tid != linked.tid[i] || pid != linked.pid[i]
+        || IsIconic(hwnd) || IsZoomed(hwnd) || !IsVisible(hwnd)
+        || GetDpiForWindow(hwnd) != linked.dpi[i]) return 0;
+    FixDWMRectLL(hwnd, &bd, 0);
+    return EqualRect(&bd, &linked.border[i]);
+}
+
+/* Recheck identity and ownership immediately before every individual attempt.
+   A window adjusted externally to a third rectangle is left alone. */
+static int LinkedRestoreEligible(unsigned i, const RECT *target)
+{
+    RECT current;
+    return LinkedParticipantIdentity(i) && GetWindowRect(linked.hwnd[i], &current)
+        && (EqualRect(&current, &linked.actual[i]) || EqualRect(&current, &target[i]));
+}
+
+static void RecoverLinkedGrid(const RECT *target)
+{
+    LGRect before[4], requested[4], observed[4];
+    unsigned identity = 0, mask, i;
+    int batch_ok = 0;
+    for (i = 0; i < 4; ++i) {
+        RECT current;
+        before[i] = (LGRect){linked.actual[i].left, linked.actual[i].top,
+                             linked.actual[i].right, linked.actual[i].bottom};
+        requested[i] = (LGRect){target[i].left, target[i].top,
+                                target[i].right, target[i].bottom};
+        if (lg_queue_current(&linked_queue, linked_dispatch)
+            && LinkedParticipantIdentity(i)
+            && GetWindowRect(linked.hwnd[i], &current)) {
+            identity |= 1u << i;
+            observed[i] = (LGRect){current.left, current.top, current.right, current.bottom};
+        }
+    }
+    if (!lg_queue_current(&linked_queue, linked_dispatch)) return;
+    mask = lg_recovery_mask(before, requested, observed, identity);
+    /* One bad participant can fail the whole batch. Try it only when every
+       participant still belongs to this operation, then fall back per HWND. */
+    if (identity == 15 && mask)
+        batch_ok = ApplyLinkedRects(linked.actual, mask);
+    for (i = 0; i < 4; ++i) if (mask & (1u << i)) {
+        RECT current;
+        if (!lg_queue_current(&linked_queue, linked_dispatch)) return;
+        if (!LinkedRestoreEligible(i, target)) continue;
+        if (!GetWindowRect(linked.hwnd[i], &current)) continue;
+        if (EqualRect(&current, &linked.actual[i])) continue;
+        if (!batch_ok || !EqualRect(&current, &linked.actual[i])) {
+            if (!lg_queue_current(&linked_queue, linked_dispatch)) return;
+            SetWindowPos(linked.hwnd[i], NULL, linked.actual[i].left, linked.actual[i].top,
+                         linked.actual[i].right - linked.actual[i].left,
+                         linked.actual[i].bottom - linked.actual[i].top,
+                         SWP_NOACTIVATE|SWP_NOZORDER|SWP_NOOWNERZORDER);
+        }
+        if (!lg_queue_current(&linked_queue, linked_dispatch)) return;
+        /* Check the result; the drag remains blocked even if recovery worked. */
+        if (!GetWindowRect(linked.hwnd[i], &current)
+            || !EqualRect(&current, &linked.actual[i])) {
+            /* The verified baseline is no longer established. The caller
+               freezes this drag; no further recovery is safe here. */
+        }
+    }
 }
 
 static int CommitLinkedGrid(void)
@@ -169,7 +242,7 @@ static int CommitLinkedGrid(void)
         SetRect(&next[i], r.left, r.top, r.right, r.bottom);
         InflateRectBorder(&next[i], &linked.border[i]);
     }
-    int ok = ApplyLinkedRects(next);
+    int ok = ApplyLinkedRects(next, 15);
     if (!lg_queue_current(&linked_queue, linked_dispatch)) return 0;
     /* Applications may reject sizes in WM_WINDOWPOSCHANGING. Verify all four;
        best-effort rollback to the last verified batch, then freeze the drag. */
@@ -179,7 +252,7 @@ static int CommitLinkedGrid(void)
     }
     if (!lg_queue_current(&linked_queue, linked_dispatch)) return 0;
     if (!ok) {
-        ApplyLinkedRects(linked.actual);
+        RecoverLinkedGrid(next);
         lg_drag_stop(&linked.drag);
         return 0;
     }

@@ -2309,7 +2309,10 @@ static void MouseMoveNow(POINT pt)
                     CommitLinkedGrid();
                     if (!lg_queue_current(&linked_queue, linked_dispatch)) return;
                 } else {
-                    MoveTransWin(&LastWin);
+                    /* pending contains visible DWM bounds. Do not let stale
+                       LastWin fields or WM_SIZING recompute this contour. */
+                    MoveTransWinRaw(r.left, r.top, r.right-r.left, r.bottom-r.top);
+                    if (!lg_queue_current(&linked_queue, linked_dispatch)) return;
                     if (!IsTransWinVisible()) ShowTransWin(SW_SHOWNA);
                 }
                 if (!lg_queue_current(&linked_queue, linked_dispatch)) return;
@@ -5852,6 +5855,7 @@ static void CancelLinkedQueue(void)
     g_InFinishMovement = 0;
     if (!conf.LinkedGridResize) return;
     lg_queue_invalidate(&linked_queue);
+    if (linked.drag.mode != LG_DRAG_LEGACY) HideTransWin();
     lg_drag_stop(&linked.drag);
 }
 static LRESULT CALLBACK LinkedQueueProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
