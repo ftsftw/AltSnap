@@ -2,6 +2,9 @@ name: Linked Grid Windows x64 test ZIP
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - feat/linked-grid-resize
 
 permissions:
   contents: read
