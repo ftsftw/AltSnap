@@ -55,6 +55,7 @@ static UCHAR g_InMouseMove;
 #include "linked_grid_queue.h"
 /* Only the hook-installing thread owns this queue and all linked state. */
 static LGQueue linked_queue;
+static LGMoveSlot linked_move;
 static HWND linked_queue_hwnd;
 static uintptr_t linked_dispatch;
 /* Legacy processing stays on the worker. Atomic tokens reject queued work
@@ -2228,17 +2229,20 @@ static void MouseMove(POINT pt)
 {
     LinkedMoveMessage *move;
     if (g_InFinishMovement) return;
-    if (conf.LinkedGridResize && (linked_queue.closed || !linked_queue_hwnd)) return;
+    if (conf.LinkedGridResize) {
+        if (linked_queue.closed || !linked_queue_hwnd) return;
+        if (lg_move_offer(&linked_move, linked_queue.generation, pt.x, pt.y)
+            && !PostMessage(linked_queue_hwnd, WM_DOMOUSEMOVE, 0, 0)) {
+            linked_move.pending = 0;
+            CancelLinkedQueue();
+        }
+        return;
+    }
     move = (LinkedMoveMessage *)malloc(sizeof *move);
     if (!move) return;
     move->pt = pt;
-    move->generation = conf.LinkedGridResize ? linked_queue.generation
-                                           : (uintptr_t)MovementGeneration();
-    if (conf.LinkedGridResize) {
-        if (!PostMessage(linked_queue_hwnd, WM_DOMOUSEMOVE, (WPARAM)move, 0)) free(move);
-    } else {
-        if (!PostThreadMessage(g_WorkerThreadID, WM_DOMOUSEMOVE, (WPARAM)move, 0)) free(move);
-    }
+    move->generation = (uintptr_t)MovementGeneration();
+    if (!PostThreadMessage(g_WorkerThreadID, WM_DOMOUSEMOVE, (WPARAM)move, 0)) free(move);
 }
 static void MouseMoveNow(POINT pt)
 {
@@ -5857,10 +5861,9 @@ static LRESULT CALLBACK LinkedQueueProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
     if (msg != WM_DOMOUSEMOVE && msg != WM_LG_FINISH && msg != WM_LG_COMBO)
         return DefWindowProc(hwnd, msg, wp, lp);
     if (msg == WM_DOMOUSEMOVE) {
-        LinkedMoveMessage *move = (LinkedMoveMessage *)wp;
-        generation = move->generation;
-        pt = move->pt;
-        free(move);
+        int32_t x, y;
+        if (!lg_move_take(&linked_move, &generation, &x, &y)) return 0;
+        pt.x = x; pt.y = y;
     } else generation = (uintptr_t)wp;
     if (!lg_queue_current(&linked_queue, generation)) return 0;
     /* A nested modal message loop must not execute another movement on the
@@ -6471,8 +6474,8 @@ __declspec(dllexport) void WINAPI Unload(void)
     linked_queue.closed = 1;
     if (linked_queue_hwnd) {
         MSG queued;
-        while (PeekMessage(&queued, linked_queue_hwnd, WM_DOMOUSEMOVE, WM_DOMOUSEMOVE, PM_REMOVE))
-            freeL((void *)queued.wParam);
+        while (PeekMessage(&queued, linked_queue_hwnd, WM_DOMOUSEMOVE, WM_DOMOUSEMOVE, PM_REMOVE)) {}
+        linked_move.pending = 0;
         DestroyWindow(linked_queue_hwnd);
         linked_queue_hwnd = NULL;
         UnregisterClass(TEXT(APP_NAMEA)TEXT("-LinkedQueue"), hinstDLL);

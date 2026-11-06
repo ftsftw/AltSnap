@@ -134,3 +134,39 @@ policy and geometry, **not real Win32 message dispatch, hooks or GUI behavior**.
 Windows GUI checks above remain required, including rapid drag/Escape/reload and
 notification ordering. The existing general-purpose worker shutdown timeout and
 legacy in-flight shared-state behavior are outside this linked-state fix.
+
+## Bounded enabled-mode movement queue
+
+The enabled-mode producer now writes a single owner-thread mailbox and posts a
+wake only on the empty-to-pending transition. Subsequent moves replace coordinates
+and generation together. Cancellation does not clear the outstanding-wake bit:
+a later operation may replace the sample, but cannot add another wake behind the
+old one. Dispatch consumes the slot before entering Win32 code, allowing at most
+one further wake during reentry. There is no per-move allocation in this path.
+Mouse-up/Alt-up stop production and enqueue finish behind the existing wake, so
+the last sample is consumed before finish for both FullWin values. Unload drains
+the wake and clears the slot; post failure cancels instead of stranding pending
+state. Nested dispatch still uses the existing fail-closed reentry policy.
+
+This is a deliberately partial responsiveness fix. Actual execution paths are:
+low-level mouse/keyboard hook -> init_movement_and_actions -> ActionMove/Resize ->
+BeginLinkedGrid, including enumeration, DWM queries and up to four 32 ms timed
+WM_GETMINMAXINFO requests, directly inside the hook callback. MouseMove only
+publishes input. LinkedQueueProc -> MouseMoveNow -> CommitLinkedGrid and
+LinkedQueueProc -> FinishMovementNow run outside the hook callback but on its
+thread, and can still delay low-level hook servicing. With the option off,
+MouseMoveNow and FinishMovementNow remain worker jobs; their allocated messages
+and the worker's consecutive-message coalescing are unchanged.
+
+Removing these remaining delays safely needs a larger ownership protocol:
+immutable capture requests, worker-owned enumeration/limits, generation-tagged
+results, and a serialized cancellation/application boundary without letting hooks
+wait for worker calls into other processes. Merely moving the existing routines
+would restore shared-state races. This commit does not implement that protocol,
+does not remove legacy allocations, and does not claim to bound Win32 latency.
+
+Portable tests add one million offers with one wake, latest-coordinate retention,
+old wake/new generation replacement and ten thousand repeated move/finish cycles.
+They exercise the production mailbox, not actual Win32 posting or hook timing.
+Windows GUI testing of hung participants, input latency, rapid Escape/reload,
+Alt-up and reentrant application behavior is still required.

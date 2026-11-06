@@ -373,9 +373,37 @@ static void queue_lifetime(void)
     }
 }
 
+static void move_coalescing(void)
+{
+    LGMoveSlot slot = {0, 0, 0, 0};
+    uintptr_t generation;
+    int32_t x, y;
+    unsigned i, wakes = 0;
+    for (i = 0; i < 1000000; ++i)
+        wakes += lg_move_offer(&slot, 1, (int32_t)i, -(int32_t)i);
+    CHECK(wakes == 1);
+    CHECK(lg_move_take(&slot, &generation, &x, &y));
+    CHECK(generation == 1 && x == 999999 && y == -999999);
+    CHECK(!lg_move_take(&slot, &generation, &x, &y));
+    /* An old outstanding wake can deliver only the newly offered sample,
+       never the old coordinates under the new token. */
+    CHECK(lg_move_offer(&slot, 2, 10, 20));
+    CHECK(!lg_move_offer(&slot, 3, 30, 40));
+    CHECK(lg_move_take(&slot, &generation, &x, &y));
+    CHECK(generation == 3 && x == 30 && y == 40);
+    for (i = 4; i < 10004; ++i) {
+        CHECK(lg_move_offer(&slot, i, 1, 2));
+        CHECK(!lg_move_offer(&slot, i, 3, 4));
+        /* Producer stops at mouse-up; wake precedes finish in the queue. */
+        CHECK(lg_move_take(&slot, &generation, &x, &y));
+        CHECK(generation == i && x == 3 && y == 4);
+        CHECK(!slot.pending);
+    }
+}
+
 int main(void)
 {
-    layouts(); limits(); oracle(); drag_lifetime(); queue_lifetime();
+    layouts(); limits(); oracle(); drag_lifetime(); queue_lifetime(); move_coalescing();
     printf("linked_grid: %u checks passed\n", checks);
     return 0;
 }

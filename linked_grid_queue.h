@@ -21,4 +21,27 @@ static int lg_queue_enter(LGQueue *q, uintptr_t generation)
     q->busy = 1;
     return 1;
 }
+/* One owner-thread wake, even across cancellation/new generations. The slot
+   contains the latest sample; invalidation does not remove an outstanding wake. */
+typedef struct {
+    uintptr_t generation;
+    int32_t x, y;
+    int pending;
+} LGMoveSlot;
+static int lg_move_offer(LGMoveSlot *s, uintptr_t generation, int32_t x, int32_t y)
+{
+    int wake = !s->pending;
+    s->generation = generation;
+    s->x = x; s->y = y;
+    s->pending = 1;
+    return wake;
+}
+static int lg_move_take(LGMoveSlot *s, uintptr_t *generation, int32_t *x, int32_t *y)
+{
+    if (!s->pending) return 0;
+    *generation = s->generation;
+    *x = s->x; *y = s->y;
+    s->pending = 0;
+    return 1;
+}
 #endif
