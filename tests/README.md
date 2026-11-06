@@ -1,0 +1,67 @@
+# Linked grid geometry tests
+
+From the repository root, run:
+
+```
+make -C tests test
+```
+
+This builds only `linked_grid.c` and its framework-free C99 tests. It neither
+builds nor starts AltSnap. Outputs go to ignored `work/linked-grid-tests/`.
+Warnings are errors. To check address and undefined behaviour sanitizers:
+
+```
+make -C tests test BUILD_DIR=../work/linked-grid-sanitized \
+  CFLAGS='-O1 -g -std=c99 -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer'
+```
+
+In environments running under ptrace, LeakSanitizer cannot run; prefix the
+command with `ASAN_OPTIONS=detect_leaks=0` to retain ASan and UBSan checks.
+The module does not allocate memory.
+
+Cross-compile the module and test harness for Windows x64 with an installed
+MinGW toolchain (compilation only; this does not run Windows tests):
+
+```
+make -C tests build CC=x86_64-w64-mingw32-gcc EXEEXT=.exe \
+  BUILD_DIR=../work/linked-grid-win64
+```
+
+Tests cover all four active inner corners, both movement directions and each
+axis alone, unchanged coordinates, all 720 permutations of six candidates,
+complete versus incomplete competing grids, permutation-independent ambiguity,
+missing windows, duplicate candidates, positive gaps, overlaps, broken alignment,
+invalid arguments, min/max restrictions contributed by each quadrant, empty and
+singleton feasible ranges, negative coordinates, 32-bit coordinate extremes,
+and untouched output on failures. A deterministic 2,000-case exhaustive oracle
+checks feasible final intersections independently of the interval algorithm.
+
+# API and integration boundary
+
+`lg_resize` takes a snapshot of candidates, an active index and its quadrant,
+and the requested absolute intersection coordinates. The header defines the
+contract and failure statuses. Results always use TL/TR/BL/BR order and retain
+indices into the supplied snapshot. Ambiguity is decided before size limits;
+constraints never choose between competing geometrical grids. The active window
+and its quadrant anchor the search, so a separate grid elsewhere is irrelevant.
+
+Detection requires exact, full-edge alignment and positive-area rectangles.
+Gaps (including uniform gaps), overlaps between grid cells, staggered seams and
+approximate alignment are rejected. Unrelated windows are ignored unless they
+complete an alternative grid; arbitrary occlusion/visibility is not modeled.
+Caller must filter to one monitor and provide unique window entries in one
+coordinate space. Invalid rectangle geometry anywhere is an argument error;
+limits of unrelated candidates are ignored. Limits are inclusive positive
+sizes, with explicit maxima (`INT32_MAX` is the largest supported size).
+Coordinates are signed 32-bit; intermediate limit arithmetic is signed 64-bit.
+Initial dimensions may violate limits if the final grid can satisfy them.
+
+The module uses O(n^3) worst-case detection time, constant storage, no heap and
+no OS APIs. For later hooks.c integration, an adapter must select eligible
+windows from the same monitor, map HWNDs/current structures to these rectangles
+and indices, obtain min/max track sizes in the same frame/DPI coordinate space,
+map the dragged inner corner to a quadrant, and apply all four returned
+rectangles together only on success. Frame-border normalization, tolerance/gap
+policy, snapshot lifetime, window disappearance and batching Win32 moves remain
+integration work. No hooks, settings, GUI or existing Sticky Resize code is
+changed or exercised here. Old compiler support before C99 is not established.
