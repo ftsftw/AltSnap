@@ -155,6 +155,6 @@ LGStatus lg_drag_update(LGDrag *drag, int32_t x, int32_t y)
 
 void lg_drag_stop(LGDrag *drag)
 {
-    drag->mode = LG_DRAG_BLOCKED;
+    if (drag->mode == LG_DRAG_ACTIVE) drag->mode = LG_DRAG_BLOCKED;
     drag->dirty = 0;
 }

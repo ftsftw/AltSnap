@@ -82,7 +82,8 @@ static void BeginLinkedGrid(POINT mouse)
                   (LGQuadrant)q, (q & 1) ? a.left : a.right,
                   (q & 2) ? a.top : a.bottom, &found) != LG_OK) return;
     /* From here a grid was captured. Any failure blocks, never falls back. */
-    lg_drag_stop(&linked.drag);
+    linked.drag.mode = LG_DRAG_BLOCKED;
+    linked.drag.dirty = 0;
     for (i = 0; i < 4; ++i) {
         HWND hwnd = linked_candidates.hwnd[found.indices[i]];
         POINT lo, hi;
@@ -145,7 +146,9 @@ static int LinkedGridValid(void)
 
 static int ApplyLinkedRects(const RECT *rects)
 {
-    HDWP batch = BeginDeferWindowPos(4);
+    HDWP batch;
+    if (!lg_queue_current(&linked_queue, linked_dispatch)) return 0;
+    batch = BeginDeferWindowPos(4);
     unsigned i;
     for (i = 0; batch && i < 4; ++i)
         batch = DeferWindowPos(batch, linked.hwnd[i], NULL, rects[i].left, rects[i].top,
@@ -158,6 +161,8 @@ static int CommitLinkedGrid(void)
 {
     RECT next[4];
     unsigned i;
+    if (!lg_queue_current(&linked_queue, linked_dispatch)
+        || linked.drag.mode != LG_DRAG_ACTIVE || !linked.drag.dirty) return 0;
     if (!LinkedGridValid()) { lg_drag_stop(&linked.drag); return 0; }
     for (i = 0; i < 4; ++i) {
         LGRect r = linked.drag.pending.rects[i];
@@ -165,12 +170,14 @@ static int CommitLinkedGrid(void)
         InflateRectBorder(&next[i], &linked.border[i]);
     }
     int ok = ApplyLinkedRects(next);
+    if (!lg_queue_current(&linked_queue, linked_dispatch)) return 0;
     /* Applications may reject sizes in WM_WINDOWPOSCHANGING. Verify all four;
        best-effort rollback to the last verified batch, then freeze the drag. */
     for (i = 0; i < 4; ++i) {
         RECT actual;
         if (!GetWindowRect(linked.hwnd[i], &actual) || !EqualRect(&actual, &next[i])) ok = 0;
     }
+    if (!lg_queue_current(&linked_queue, linked_dispatch)) return 0;
     if (!ok) {
         ApplyLinkedRects(linked.actual);
         lg_drag_stop(&linked.drag);

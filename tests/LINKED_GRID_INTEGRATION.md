@@ -90,3 +90,47 @@ Check applications adjusting sizes (terminals), live WM_GETMINMAXINFO changes,
 hung/elevated windows and failed batch/rollback. Verify activation does not move
 windows, external moves stop capture, and no unrelated fifth window moves.
 Stress rapid successive drags/Escape against the existing hook/worker queue.
+
+## Cancellation and queue ownership (audit fixes)
+
+With LinkedGridResize=1, movement, finalization and move/resize combo work are
+posted to a private message window on the hook-installing thread. The existing
+worker remains in use for legacy (option off) movement and other AltSnap jobs.
+There is no cross-thread access to linked state and no waiting for the worker
+from a hook. This deliberately moves enabled-mode processing to the owner thread;
+hook/owner latency and preview optimization are separate future work.
+
+Each enabled-mode message carries a non-reused generation. New actions, Escape,
+unhook, combo locking, completion (even while Alt remains down), and Unload
+invalidate it. Probes do not advance generations, and probes/reentrant starts
+cannot overwrite a captured operation. Generation exhaustion fails closed.
+Load after Unload preserves the sequence, including when the DLL stays loaded.
+Pending heap-backed move messages are freed on dequeue, post failure or unload.
+Legacy worker messages and finalizers also carry an atomic generation, but the
+option-off path has no linked admission guard and retains the existing worker.
+Its already executing legacy movement is not made transactional by these tokens.
+
+Win32 calls may reenter hooks. A busy owner rejects replacement until its callback
+unwinds; cancellation can still invalidate the token immediately. Commit checks
+the token after validation and before starting ApplyLinkedRects. There are no
+callbacks/position changes in BeginDeferWindowPos/DeferWindowPos; EndDeferWindowPos
+is the batch application boundary. An already entered batch may finish after
+Escape. On return, cancellation prevents further application (including the
+existing best-effort recovery batch). No rollback-on-Escape is added. A nested
+modal loop dispatching another movement/finalizer while busy cancels the operation
+instead of recursively applying or leaving the finish flag stuck.
+
+Mouse-up is queued after preceding mouse samples. Those samples are processed
+before finalization even when the finish flag is set. FullWin=0 still applies
+only at finalization; FullWin=1 still applies on movement. Stop preserves LEGACY;
+only ACTIVE becomes BLOCKED. Capture failure explicitly selects BLOCKED so the
+legacy fix cannot accidentally enable single-cell fallback for a captured grid.
+
+The portable tests use the production queue policy with deterministic interruption
+points: before dequeue, after pending calculation, inside an already started
+batch, after dispatch, old move/finish tokens after a new drag, repeated stop,
+option off/on, FullWin off/on, busy reentry and generation exhaustion. They test
+policy and geometry, **not real Win32 message dispatch, hooks or GUI behavior**.
+Windows GUI checks above remain required, including rapid drag/Escape/reload and
+notification ordering. The existing general-purpose worker shutdown timeout and
+legacy in-flight shared-state behavior are outside this linked-state fix.

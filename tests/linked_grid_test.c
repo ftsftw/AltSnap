@@ -1,3 +1,4 @@
+#include "../linked_grid_queue.h"
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "../linked_grid.h"
 #include <stdio.h>
@@ -289,9 +290,92 @@ static void drag_lifetime(void)
     }
 }
 
+/* These use the production single-owner queue policy, not Windows GUI stubs.
+   Calls between enter/current simulate reentrant hooks at deterministic points. */
+static void queue_lifetime(void)
+{
+    unsigned fullwin, phase, enabled, repeat;
+    LGWindow w[4];
+    grid(w, 0, 0, 50, 50, 100, 100);
+    for (enabled = 0; enabled < 2; ++enabled)
+    for (fullwin = 0; fullwin < 2; ++fullwin)
+    for (phase = 0; phase < 4; ++phase) {
+        LGQueue queue = {1, 0, 0};
+        LGDrag drag;
+        uintptr_t old = queue.generation;
+        unsigned applies = 0;
+        lg_drag_begin(&drag, w, 4, 0, LG_TL, enabled, fullwin);
+        if (phase == 0) { /* Escape before dequeue. */
+            lg_queue_invalidate(&queue);
+            lg_drag_stop(&drag);
+        }
+        if (lg_queue_enter(&queue, old)) {
+            CHECK(!lg_queue_enter(&queue, old)); /* reentrant drag/probe */
+            if (enabled) CHECK(lg_drag_update(&drag, 60, 65) == LG_OK);
+            if (phase == 1) { /* pending calculated, before batch */
+                lg_queue_invalidate(&queue);
+                lg_drag_stop(&drag);
+            }
+            if (enabled && lg_queue_current(&queue, old) && drag.dirty) ++applies;
+            if (phase == 2) { /* inside the already started batch */
+                lg_queue_invalidate(&queue);
+                lg_drag_stop(&drag);
+                CHECK(!lg_queue_current(&queue, old)); /* no second/rollback batch */
+            }
+            queue.busy = 0;
+        }
+        if (phase == 3) { /* after dispatch, before queued mouse-up */
+            lg_queue_invalidate(&queue);
+            lg_drag_stop(&drag);
+        }
+        CHECK(applies == (enabled && phase >= 2));
+        CHECK(!lg_queue_enter(&queue, old)); /* queued move AND finish */
+        CHECK(!drag.dirty);
+        CHECK(drag.mode == (enabled ? LG_DRAG_BLOCKED : LG_DRAG_LEGACY));
+        for (repeat = 0; repeat < 3; ++repeat) { /* up/Escape/unhook remain idempotent */
+            lg_drag_stop(&drag);
+            CHECK(drag.mode == (enabled ? LG_DRAG_BLOCKED : LG_DRAG_LEGACY));
+        }
+        lg_queue_invalidate(&queue); /* new drag while old messages remain */
+        lg_drag_begin(&drag, w, 4, 0, LG_TL, enabled, fullwin);
+        CHECK(!lg_queue_enter(&queue, old));
+        CHECK(lg_queue_enter(&queue, queue.generation));
+        CHECK(drag.mode == (enabled ? LG_DRAG_ACTIVE : LG_DRAG_LEGACY));
+        queue.busy = 0;
+        queue.closed = 1; /* unload rejects queued messages */
+        CHECK(!lg_queue_enter(&queue, queue.generation));
+    }
+    /* Ordered move -> mouse-up, with FullWin selecting the apply boundary. */
+    for (fullwin = 0; fullwin < 2; ++fullwin) {
+        LGQueue queue = {1, 0, 0};
+        LGDrag drag;
+        unsigned applies = 0;
+        uintptr_t generation = queue.generation;
+        CHECK(lg_drag_begin(&drag, w, 4, 0, LG_TL, 1, fullwin) == LG_OK);
+        CHECK(lg_queue_enter(&queue, generation));
+        CHECK(lg_drag_update(&drag, 60, 65) == LG_OK);
+        if (drag.fullwin) { ++applies; drag.dirty = 0; }
+        queue.busy = 0;
+        CHECK(applies == fullwin);
+        CHECK(lg_queue_enter(&queue, generation)); /* mouse-up */
+        if (drag.dirty) ++applies;
+        lg_drag_stop(&drag);
+        lg_queue_invalidate(&queue); /* finish with Alt still held */
+        queue.busy = 0;
+        CHECK(applies == 1);
+        CHECK(!lg_queue_enter(&queue, generation));
+        CHECK(drag.mode == LG_DRAG_BLOCKED && !drag.dirty);
+    }
+    {
+        LGQueue queue = {UINTPTR_MAX, 0, 0};
+        lg_queue_invalidate(&queue);
+        CHECK(queue.closed && !lg_queue_enter(&queue, UINTPTR_MAX));
+    }
+}
+
 int main(void)
 {
-    layouts(); limits(); oracle(); drag_lifetime();
+    layouts(); limits(); oracle(); drag_lifetime(); queue_lifetime();
     printf("linked_grid: %u checks passed\n", checks);
     return 0;
 }

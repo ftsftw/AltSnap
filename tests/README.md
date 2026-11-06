@@ -6,7 +6,8 @@ From the repository root, run:
 make -C tests test
 ```
 
-This builds only `linked_grid.c` and its framework-free C99 tests. It neither
+This builds `linked_grid.c`, the owner-queue policy in `linked_grid_queue.h`,
+and their framework-free C99 tests. It neither
 builds nor starts AltSnap. Outputs go to ignored `work/linked-grid-tests/`.
 Warnings are errors. To check address and undefined behaviour sanitizers:
 

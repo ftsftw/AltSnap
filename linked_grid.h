@@ -53,5 +53,6 @@ typedef struct {
 LGStatus lg_drag_begin(LGDrag *drag, const LGWindow *windows, size_t count,
                        size_t active, LGQuadrant quadrant, int enabled, int fullwin);
 LGStatus lg_drag_update(LGDrag *drag, int32_t x, int32_t y);
+/* Stop never promotes LEGACY to BLOCKED; only captured operations freeze. */
 void lg_drag_stop(LGDrag *drag);
 #endif

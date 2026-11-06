@@ -9,7 +9,7 @@ test: build
 
 build: $(BIN)
 
-$(BIN): linked_grid_test.c ../linked_grid.c ../linked_grid.h
+$(BIN): linked_grid_test.c ../linked_grid.c ../linked_grid.h ../linked_grid_queue.h
 	mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) ../linked_grid.c linked_grid_test.c $(LDFLAGS) -o $@
 
