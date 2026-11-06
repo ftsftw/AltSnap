@@ -3,6 +3,25 @@
 #include <stdlib.h>
 static unsigned checks;
 #define CHECK(x) do { ++checks; if (!(x)) { fprintf(stderr,"%s:%d: %s\n", __FILE__,__LINE__,#x); exit(1); } } while (0)
+static void preview_cases(void)
+{
+    LGDrag drag = {0};
+    LGRect expected;
+    unsigned quadrant, previous;
+    for (previous = 0; previous < 4; ++previous)
+    for (quadrant = 0; quadrant < 4; ++quadrant) {
+        unsigned i;
+        for (i = 0; i < 4; ++i)
+            drag.pending.rects[i] = (LGRect){(int32_t)i*90, (int32_t)previous*10,
+                                              (int32_t)i*90+80, (int32_t)previous*10+80};
+        drag.quadrant = (LGQuadrant)quadrant;
+        drag.fullwin = 0;
+        expected = drag.pending.rects[quadrant];
+        CHECK(lg_rect_equal(lg_preview_active(&drag), expected));
+        drag.fullwin = 1;
+        CHECK(lg_rect_equal(lg_preview_active(&drag), expected));
+    }
+}
 static void recovery_cases(void)
 {
     LGRect before[4], target[4], observed[4];
@@ -34,4 +53,4 @@ static void recovery_cases(void)
     CHECK(lg_recovery_mask(before,target,observed,0) == 0);
     puts("linked_grid_recovery: checks passed");
 }
-int main(void) { recovery_cases(); return 0; }
+int main(void) { preview_cases(); recovery_cases(); return 0; }

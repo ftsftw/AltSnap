@@ -2,6 +2,11 @@
 #ifndef ALTSNAP_LINKED_GRID_RECOVERY_H
 #define ALTSNAP_LINKED_GRID_RECOVERY_H
 #include "linked_grid.h"
+/* The linked outline uses the already solved visible rectangle. */
+static LGRect lg_preview_active(const LGDrag *drag)
+{
+    return drag->pending.rects[drag->quadrant];
+}
 static int lg_rect_equal(LGRect a, LGRect b)
 {
     return a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom;

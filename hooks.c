@@ -2296,7 +2296,7 @@ static void MouseMoveNow(POINT pt)
             int64_t y = (int64_t)linked.y + pt.y - linked.mouse.y;
             if (lg_drag_update(&linked.drag, (int32_t)larger(INT32_MIN, smaller(INT32_MAX, x)),
                                (int32_t)larger(INT32_MIN, smaller(INT32_MAX, y))) == LG_OK) {
-                LGRect r = linked.drag.pending.rects[linked.drag.quadrant];
+                LGRect r = lg_preview_active(&linked.drag);
                 RECT bd = linked.border[linked.drag.quadrant];
                 LastWin.hwnd = state.hwnd;
                 LastWin.x = r.left - bd.left;
