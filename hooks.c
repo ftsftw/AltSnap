@@ -204,6 +204,7 @@ static struct config {
     UCHAR Aero;
     UCHAR SmartAero;
     UCHAR StickyResize;
+    UCHAR LinkedGridResize;
     UCHAR InactiveScroll;
     UCHAR MDI;
     UCHAR ResizeCenter;
@@ -312,6 +313,7 @@ static const struct OptionListItem General_uchars[] = {
     { "Aero", 1 },
     { "SmartAero", 1 },
     { "StickyResize", 0 },
+    { "LinkedGridResize", 0 },
     { "InactiveScroll", 0 },
     { "MDI", 0 },
     { "ResizeCenter", 1 },
@@ -887,6 +889,8 @@ static int ShouldResizeTouching(void)
           || ((conf.StickyResize&3)==2 && !state.shift)
         );
 }
+#include "linked_grid_win.h"
+
 static void EnumOnce(RECT **bd);
 static int ResizeTouchingWindows(LPVOID lwptr)
 {
@@ -2210,7 +2214,9 @@ static void MouseMoveNow(POINT pt)
 
     // Check if window still exists
     if (!IsWindow(state.hwnd))
-        { LastWin.hwnd = NULL; UnhookMouse(); return; }
+        { LastWin.hwnd = NULL;
+          if (linked.drag.mode != LG_DRAG_LEGACY) HideTransWin();
+          UnhookMouse(); return; }
 
     // Ensure the point is in its clip rectangle (Windows bug)
     RECT clip;
@@ -2246,6 +2252,34 @@ static void MouseMoveNow(POINT pt)
             was_snapped = IsWindowSnapped(state.hwnd);
             RestoreOldWin(pt, was_snapped, &wnd);
         }
+    }
+    if (linked.drag.mode != LG_DRAG_LEGACY) {
+        if (linked.drag.mode == LG_DRAG_ACTIVE && LinkedGridValid()) {
+            int64_t x = (int64_t)linked.x + pt.x - linked.mouse.x;
+            int64_t y = (int64_t)linked.y + pt.y - linked.mouse.y;
+            if (lg_drag_update(&linked.drag, (int32_t)larger(INT32_MIN, smaller(INT32_MAX, x)),
+                               (int32_t)larger(INT32_MIN, smaller(INT32_MAX, y))) == LG_OK) {
+                LGRect r = linked.drag.pending.rects[linked.drag.quadrant];
+                RECT bd = linked.border[linked.drag.quadrant];
+                LastWin.hwnd = state.hwnd;
+                LastWin.x = r.left - bd.left;
+                LastWin.y = r.top - bd.top;
+                LastWin.width = r.right - r.left + bd.left + bd.right;
+                LastWin.height = r.bottom - r.top + bd.top + bd.bottom;
+                if (linked.drag.fullwin) {
+                    if (LastWin.start) NotifySizeMoveStaEnd(state.hwnd, 1);
+                    LastWin.start = 0;
+                    CommitLinkedGrid();
+                } else {
+                    MoveTransWin(&LastWin);
+                    if (!IsTransWinVisible()) ShowTransWin(SW_SHOWNA);
+                }
+                state.moving = 1;
+            }
+        } else lg_drag_stop(&linked.drag);
+        if (linked.drag.mode == LG_DRAG_BLOCKED) HideTransWin();
+        LastWin.hwnd = NULL; /* Never let the legacy finalizer move one cell. */
+        return;
     }
     int posx=0, posy=0, wndwidth=0, wndheight=0;
 
@@ -5054,6 +5088,9 @@ static int xpure DoubleClamp(int ptx, int left, int right, int rwidth)
 // If we pass buttonX BT_PROBE it will tell us if we pass the blacklist.
 static int init_movement_and_actions(POINT pt, HWND hwnd, action_t action, int buttonX)
 {
+    /* Do not overwrite a captured grid while its worker batch is in flight. */
+    if (linked.drag.mode != LG_DRAG_LEGACY && (g_InMouseMove || g_InFinishMovement))
+        return 0;
     //RGTICTAC tt; RGTic(&tt);
     LOG("\ninit_movement_and_actions(pt=%d,%d, hwnd=%x, action=%d, button=%d)", pt.x, pt.y, (UINT)(INT_PTR)hwnd, (int)action.ac, buttonX);
     RECT wnd;
@@ -5176,6 +5213,7 @@ static int init_movement_and_actions(POINT pt, HWND hwnd, action_t action, int b
         SetWindowTrans(state.hwnd);
 
         LastWin.start = 1;
+        BeginLinkedGrid(pt);
     } else if (BT_WHEELD <= button  && button <= BT_HWHEELU) {
         // Wheel actions, directly return here
         // because maybe the action will not be done
@@ -5275,7 +5313,18 @@ static DWORD WINAPI FinishMovementNow(LPVOID pp)
     StopSpeedMes();
     ShowSnapLayoutPreview(ZONES_PREV_HIDE);
     //Sleep(5000);
-    if (!conf.FullWin && LastWin.hwnd && state.moving == 1) {
+    int linked_finish = linked.drag.mode != LG_DRAG_LEGACY;
+    int linked_notified = linked.drag.fullwin && state.moving == 1;
+    if (linked_finish) {
+        if (linked.drag.mode == LG_DRAG_ACTIVE && linked.drag.dirty) {
+            if (!linked.drag.fullwin) NotifySizeMoveStaEnd(state.hwnd, 1);
+            CommitLinkedGrid();
+            if (!linked.drag.fullwin) NotifySizeMoveStaEnd(state.hwnd, 0);
+        }
+        LastWin.hwnd = NULL;
+        lg_drag_stop(&linked.drag);
+    }
+    if (!linked_finish && !conf.FullWin && LastWin.hwnd && state.moving == 1) {
         if (state.action.ac == AC_RESIZE) {
             ResizeAllSnappedWindows();
         }
@@ -5316,7 +5365,7 @@ static DWORD WINAPI FinishMovementNow(LPVOID pp)
     HideTransWin();
 
     // Send WM_EXITSIZEMOVE and EVENT_SYSTEM_MOVESIZEEND
-    if(conf.FullWin && state.moving == 1)
+    if((linked_finish ? linked_notified : conf.FullWin && state.moving == 1))
         NotifySizeMoveStaEnd(state.hwnd, 0);
 
     state.action = k_action_none;
@@ -5722,6 +5771,7 @@ static void UnhookMouseOnly(void)
 static void UnhookMouse(void)
 {
     // Stop action
+    lg_drag_stop(&linked.drag);
     state.action = k_action_none;
     state.ctrl = 0;
     state.shift = 0;

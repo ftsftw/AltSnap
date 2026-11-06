@@ -57,11 +57,7 @@ Coordinates are signed 32-bit; intermediate limit arithmetic is signed 64-bit.
 Initial dimensions may violate limits if the final grid can satisfy them.
 
 The module uses O(n^3) worst-case detection time, constant storage, no heap and
-no OS APIs. For later hooks.c integration, an adapter must select eligible
-windows from the same monitor, map HWNDs/current structures to these rectangles
-and indices, obtain min/max track sizes in the same frame/DPI coordinate space,
-map the dragged inner corner to a quadrant, and apply all four returned
-rectangles together only on success. Frame-border normalization, tolerance/gap
-policy, snapshot lifetime, window disappearance and batching Win32 moves remain
-integration work. No hooks, settings, GUI or existing Sticky Resize code is
-changed or exercised here. Old compiler support before C99 is not established.
+no OS APIs. The hooks.c adapter selects eligible
+windows from the same monitor and maps HWNDs, frame bounds and track limits to
+the pure geometry API. Tolerance and gaps remain unsupported. The Win32 adapter is documented in [LINKED_GRID_INTEGRATION.md](LINKED_GRID_INTEGRATION.md);
+portable tests do not exercise Windows GUI behavior. Old compiler support before C99 is not established.

@@ -40,4 +40,18 @@ typedef struct {
 LGStatus lg_resize(const LGWindow *windows, size_t count, size_t active,
                    LGQuadrant quadrant, int32_t x, int32_t y, LGResult *result);
 
+/* Drag lifetime, independent of Win32. LEGACY is latched until next begin;
+   BLOCKED consumes the drag without allowing a fallback after grid capture. */
+typedef enum { LG_DRAG_LEGACY, LG_DRAG_ACTIVE, LG_DRAG_BLOCKED } LGDragMode;
+typedef struct {
+    LGDragMode mode;
+    LGWindow windows[4];
+    LGQuadrant quadrant;
+    LGResult pending;
+    int fullwin, dirty;
+} LGDrag;
+LGStatus lg_drag_begin(LGDrag *drag, const LGWindow *windows, size_t count,
+                       size_t active, LGQuadrant quadrant, int enabled, int fullwin);
+LGStatus lg_drag_update(LGDrag *drag, int32_t x, int32_t y);
+void lg_drag_stop(LGDrag *drag);
 #endif

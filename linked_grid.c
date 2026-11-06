@@ -110,3 +110,51 @@ LGStatus lg_resize(const LGWindow *windows, size_t count, size_t active,
     *result = next;
     return LG_OK;
 }
+
+LGStatus lg_drag_begin(LGDrag *drag, const LGWindow *windows, size_t count,
+                       size_t active, LGQuadrant quadrant, int enabled, int fullwin)
+{
+    LGResult result;
+    LGStatus status;
+    LGRect a;
+    unsigned i, q = (unsigned)quadrant;
+    drag->mode = LG_DRAG_LEGACY;
+    drag->dirty = 0;
+    drag->fullwin = !!fullwin;
+    if (!enabled || !windows || active >= count || q > LG_BR)
+        return LG_NOT_FOUND;
+    a = windows[active].rect;
+    status = lg_resize(windows, count, active, quadrant,
+                       (q & 1) ? a.left : a.right,
+                       (q & 2) ? a.top : a.bottom, &result);
+    if (status == LG_NOT_FOUND || status == LG_AMBIGUOUS)
+        return status;
+    drag->mode = LG_DRAG_BLOCKED;
+    if (status != LG_OK) return status;
+    /* Do not jump to a different intersection just by starting a drag. */
+    if (result.x != ((q & 1) ? a.left : a.right)
+        || result.y != ((q & 2) ? a.top : a.bottom))
+        return LG_INCOMPATIBLE_LIMITS;
+    for (i = 0; i < 4; ++i) drag->windows[i] = windows[result.indices[i]];
+    drag->pending = result;
+    drag->quadrant = quadrant;
+    drag->mode = LG_DRAG_ACTIVE;
+    return LG_OK;
+}
+
+LGStatus lg_drag_update(LGDrag *drag, int32_t x, int32_t y)
+{
+    LGStatus status;
+    if (drag->mode != LG_DRAG_ACTIVE) return LG_NOT_FOUND;
+    status = lg_resize(drag->windows, 4, drag->quadrant, drag->quadrant,
+                       x, y, &drag->pending);
+    if (status != LG_OK) lg_drag_stop(drag);
+    else drag->dirty = 1;
+    return status;
+}
+
+void lg_drag_stop(LGDrag *drag)
+{
+    drag->mode = LG_DRAG_BLOCKED;
+    drag->dirty = 0;
+}

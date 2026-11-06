@@ -246,9 +246,52 @@ static void oracle(void)
     }
 }
 
+static void drag_lifetime(void)
+{
+    LGWindow w[5], snapshot[4];
+    LGDrag d;
+    LGResult previous;
+    unsigned q;
+    for (q = 0; q < 4; ++q) {
+        grid(w, -100, -100, 0, 0, 100, 100);
+        CHECK(lg_drag_begin(&d, w, 4, q, (LGQuadrant)q, 0, 1) == LG_NOT_FOUND);
+        CHECK(d.mode == LG_DRAG_LEGACY && !d.dirty);
+        CHECK(lg_drag_update(&d, 10, 20) == LG_NOT_FOUND);
+        CHECK(lg_drag_begin(&d, w, 4, q, (LGQuadrant)q, 1, q & 1) == LG_OK);
+        CHECK(d.mode == LG_DRAG_ACTIVE && d.fullwin == (int)(q & 1) && !d.dirty);
+        memcpy(snapshot, d.windows, sizeof snapshot);
+        /* Later candidate/limit changes do not replace the captured snapshot. */
+        w[0].rect.left = -999; w[3].min_width = 500;
+        CHECK(lg_drag_update(&d, 15, -25) == LG_OK);
+        CHECK(d.dirty && memcmp(snapshot, d.windows, sizeof snapshot) == 0);
+        geometry(d.windows, &d.pending, 15, -25);
+        previous = d.pending;
+        /* Missing participant, cancellation or application failure use stop. */
+        lg_drag_stop(&d);
+        CHECK(d.mode == LG_DRAG_BLOCKED && !d.dirty);
+        CHECK(lg_drag_update(&d, 30, 40) == LG_NOT_FOUND);
+        CHECK(memcmp(&previous, &d.pending, sizeof previous) == 0);
+        grid(w, 0, 0, 50, 50, 100, 100);
+        CHECK(lg_drag_begin(&d, w, 3, 0, LG_TL, 1, 0) == LG_NOT_FOUND);
+        CHECK(d.mode == LG_DRAG_LEGACY);
+        w[4] = w[3];
+        CHECK(lg_drag_begin(&d, w, 5, 0, LG_TL, 1, 0) == LG_AMBIGUOUS);
+        CHECK(d.mode == LG_DRAG_LEGACY);
+        w[0].min_width = 80; w[3].min_width = 80;
+        CHECK(lg_drag_begin(&d, w, 4, 0, LG_TL, 1, 0) == LG_INCOMPATIBLE_LIMITS);
+        CHECK(d.mode == LG_DRAG_BLOCKED && !d.dirty);
+        w[3].min_width = 1; /* Feasible, but initial intersection invalid. */
+        CHECK(lg_drag_begin(&d, w, 4, 0, LG_TL, 1, 0) == LG_INCOMPATIBLE_LIMITS);
+        CHECK(d.mode == LG_DRAG_BLOCKED);
+        grid(w, 0, 0, 50, 50, 100, 100);
+        CHECK(lg_drag_begin(&d, w, 4, 0, LG_TL, 1, 0) == LG_OK);
+        CHECK(d.mode == LG_DRAG_ACTIVE && !d.dirty && !d.fullwin);
+    }
+}
+
 int main(void)
 {
-    layouts(); limits(); oracle();
+    layouts(); limits(); oracle(); drag_lifetime();
     printf("linked_grid: %u checks passed\n", checks);
     return 0;
 }
