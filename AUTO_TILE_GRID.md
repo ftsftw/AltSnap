@@ -50,8 +50,8 @@ The supplied Windows 10 results confirm AutoTileGrid for Chrome, VS Code,
 OpenCode and Windows Terminal, including 2×2 and subsequent Linked Grid Resize.
 VS Code's earlier elevated instance blocked tiling after process lookup; running
 it without elevation worked. This is not evidence that process lookup bypasses
-Windows privileges. Portable MobaXterm returns `skip-owner` both normal and
-maximized. With it open, three ordinary windows tile in 1+2 while MobaXterm stays
+Windows privileges. Without registered consent, portable MobaXterm returns
+`skip-owner` both normal and maximized. With it open, three ordinary windows tile in 1+2 while MobaXterm stays
 in place. Its earlier Linked Grid Resize minimum-size/guarded rollback test also
 passed; that does not establish AutoTileGrid eligibility. The owner diagnostics
 below and the explicit selection action have now been exercised by the user on
@@ -450,8 +450,12 @@ build**. It does not infer a main-window role from APPWINDOW, a class, EXE name,
 owner or enabled bit. Nothing is automatically enrolled, and no MobaXterm name
 is built into the implementation. Portable executables may use arbitrary names.
 AutoTileGridSelected keeps its existing foreground-based behavior as a fallback.
-The supplied Windows 10 report confirms Selected only; the new registered-profile
-path still requires the real GUI test below.
+The latest user report on Windows 10 confirms registered-profile tiling for normal
+portable MobaXterm, including 2×2 with three ordinary apps while another app has
+foreground, and a safe refusal with the tested modal dialog. It also exposed a
+minimization regression: a minimized main blocked tiling its ordinary peers until
+MobaXterm exited. The fix below has stub coverage; its minimize/restore behavior
+still requires the real Windows 10 GUI check. No new GUI run was performed here.
 
 #### One-time setup through the Windows 10 interface
 
@@ -552,10 +556,11 @@ otherwise unrelated protected/transient app and never increases access rights.
 
 Profile discovery and witnesses are rechecked before/after capture, through
 baseline checks, after message-sending min/max queries and normalization, before
-the final batch, and in observation/recovery eligibility. A matched profiled window
-that fails an ordinary gate (including blacklist, minimized/fullscreen/DPI/min-max
+the final batch, and in observation/recovery eligibility. A participating profiled window
+that fails an ordinary gate (including blacklist, fullscreen/DPI/min-max
 or DWM checks), or disappears from capture, cancels the **whole** operation. It is
-not silently omitted so that peers can cover its dialog. Ordinary peers retain
+not silently omitted so that peers can cover its dialog. Verified minimized
+registrations are inactive as described below. Ordinary peers retain
 their prior exclusions, but five eligible participants still refuse before any
 normalization. Drag/busy refusal, 1–4 planning, double capture, the VS Code process
 fallback and Linked Grid Resize algorithms stay unchanged.
@@ -566,6 +571,45 @@ peers, but must not force a now-invalid trusted HWND back. As with Selected, thi
 can leave partial recovery after application callbacks or an external change.
 The existing maximize recovery can activate/raise a window; no stronger atomicity
 or focus guarantee is claimed.
+
+#### Minimized registrations: presence versus participation
+
+An enabled profile does not require its window to participate in every layout.
+Each operation distinguishes:
+
+| State | Effect |
+| --- | --- |
+| Absent | No matching visible application on the selected monitor; tile ordinary participants as before |
+| Participating | A unique, fully verified, non-minimized main must pass all ordinary capture gates |
+| Minimized/inactive | A unique, fully verified main with IsIconic=true is pinned and checked, but omitted from the grid |
+| Suspicious/invalid | Latch refusal for the whole operation; never silently fall back to peers |
+
+Previously, profile discovery pinned a minimized main, IsSnapCandidate correctly
+excluded it, then profile-not-captured rejected the remaining set. A regression
+test reproduces exactly that path: three peers captured, skip-minimized, then
+profile-not-captured. The capture requirement now applies only to participating
+profile witnesses; it has not been removed. A stable minimized main therefore
+allows **1–4 ordinary peers** to tile, does not count toward the four-window limit,
+and is never restored, normalized, sized or moved by this operation. Closing the
+application also leaves peers eligible. Restoring it before the next invocation
+automatically restores participation, without registration or foreground changes.
+
+Minimization is not permission to skip verification. The inactive main still
+requires the enrolled classes/path/build, unchanged candidate/owner identities,
+topology/styles, visibility and enabled state, and no extra visible same-process
+surface except the enrolled owner. A visible modal/modeless/custom dialog still
+cancels, including when the main is hidden or minimized. Hidden windows are not
+globally treated as safe inactivity. Owner/class/build uncertainty still cancels;
+an app whose owner becomes hidden or otherwise changes its enrolled topology on
+minimize may therefore still refuse and needs separate evidence, not a bypass.
+
+The first verified IsIconic state is frozen for the invocation and checked around
+the shared guard, discovery, hashing, capture and preflight. Minimize/restore
+during that interval cancels the current attempt; the next stable invocation can
+succeed. No replacement HWND is admitted after initial discovery. A late change
+after batch application uses existing guarded recovery: safe peers may be restored,
+but an externally changed profiled window is not forcibly restored or unminimized.
+Sequential observations still have the HWND/timing limitations described below.
 
 With **no enabled profiles**, the ordinary path does not scan profile candidates,
 open/hash images, read profile keys per shortcut or query foreground. It keeps the
@@ -579,8 +623,8 @@ All new trace output stays under **AltSnap.ATG** and uses fixed codes/counts:
 
 | Event | Meaning |
 | --- | --- |
-| `profile-refused` | Invalid enabled record, discovery ambiguity, missing/changed build/classes/topology, suspect peer/dialog or failed required read |
-| `profile-not-captured` | A pinned profiled target failed ordinary capture; no partial-set fallback |
+| `profile-refused` | Invalid enabled record, discovery ambiguity, changed build/classes/topology/minimize state, suspect peer/dialog or failed required read |
+| `profile-not-captured` | A pinned participating target failed ordinary capture; verified inactive mains are not required in the grid |
 | `profile-witness-lost` | The profiled HWND no longer satisfies its operation-local consent witness |
 | `profile-allocation-failed` | The operation-local state could not be allocated |
 | `profile-preflight-changed` | Last shared baseline before batch creation changed |
@@ -631,12 +675,26 @@ or new real MobaXterm GUI success is claimed by this implementation.
    practical. Keep full filtered trace and manual case/version notes separately.
    A guarded refusal to restore a changed identity is expected, not a reason to
    force rollback. Repeat successful controls with AutoTileTrace=0.
+7. **Minimize regression:** with the existing enabled registration, minimize
+   MobaXterm using its minimize button. Focus an ordinary app and invoke the
+   ordinary shortcut with 1, 2, 3 and 4 eligible ordinary windows in turn. They
+   must tile while MobaXterm stays minimized; there must be no profile-not-captured
+   refusal solely because of stable minimization. Restore MobaXterm: with up to
+   three peers it must join again, while four peers plus restored MobaXterm must
+   give too-many without movement. Repeat several minimize/restore cycles and
+   after restarting AltSnap. Close MobaXterm and check the peer-only control.
+8. If the application permits it, leave a visible modal/modeless/custom dialog
+   while minimizing/hiding the main and invoke from another app: expect whole
+   refusal with no movement. Trigger minimize/restore during a call where
+   practical: a detected transition may refuse that call; retry when stable.
+   Repeat with trace off and another registered application. Report untestable
+   dialog/timing cases separately; stub coverage is not a GUI confirmation.
 
 Portable tests/stubs cover the policy and persistence. CI additionally executes
 real Windows ANSI/Unicode INI, SHA-256 known-vector, changed/empty/oversized image
 and file-sharing-lock tests. These are **not a MobaXterm GUI test**. The user must
-validate the new automatic registered-profile path on the actual Windows 10
-build before treating it as confirmed compatibility.
+validate the minimize/restore fix and remaining registered-profile cases on the
+actual Windows 10 build before extending the confirmed compatibility report.
 
 Sources: Microsoft [GetWindow](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindow),
 [window styles](https://learn.microsoft.com/en-us/windows/win32/winmsg/window-styles),

@@ -337,7 +337,7 @@ static int AutoTileCaptureOwned(HMONITOR monitor, ATGSnapshot *s, const ATGSelec
     if (!AutoTileOwnedCheck(owned)) { AutoTileTrace("profile-refused", 0); return 0; }
     if (owned) {
         unsigned j;
-        for (j=0; j<ATG_OWNED_SLOTS; ++j) if (owned->pins[j].hwnd) {
+        for (j=0; j<ATG_OWNED_SLOTS; ++j) if (owned->states[j]==ATG_OWNED_PARTICIPATING) {
             for (i=0; i<s->count && s->hwnd[i]!=owned->pins[j].hwnd; ++i) { }
             if (i==s->count) {
                 owned->failed=1; AutoTileTrace("profile-not-captured", 0); return 0;

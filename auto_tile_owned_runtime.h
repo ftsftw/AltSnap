@@ -16,11 +16,15 @@ static void AutoTileOwnedLoad(const TCHAR *ini)
     }
 }
 
+/* A verified minimized surface is present, but is not a grid participant.
+   Freeze this distinction for one operation; a transition requires a new call. */
+enum { ATG_OWNED_ABSENT, ATG_OWNED_PARTICIPATING, ATG_OWNED_MINIMIZED };
 typedef struct {
     HMONITOR monitor;
     ATGOwnedProfile profiles[ATG_OWNED_SLOTS];
     ATGSelectedOwned pins[ATG_OWNED_SLOTS];
     ATGOwnedImage images[ATG_OWNED_SLOTS];
+    unsigned states[ATG_OWNED_SLOTS];
     unsigned seen[ATG_OWNED_SLOTS], matches[ATG_OWNED_SLOTS];
     int initialized, failed;
 } ATGOwnedOperation;
@@ -52,11 +56,23 @@ static BOOL CALLBACK AutoTileOwnedScan(HWND hwnd, LPARAM lp)
         if (!lstrcmp(classname, p->candidate_class)) {
             if (++op->matches[i]>1) return FALSE;
             if (!op->initialized) {
-                if (!ATGOwnedPin(hwnd, &op->pins[i])) return FALSE;
+                int minimized=!!IsIconic(hwnd);
+                if (!ATGOwnedPin(hwnd, &op->pins[i]) || !!IsIconic(hwnd)!=minimized) return FALSE;
+                op->states[i]=minimized ? ATG_OWNED_MINIMIZED : ATG_OWNED_PARTICIPATING;
             } else if (hwnd!=op->pins[i].hwnd) return FALSE;
         }
     }
     return TRUE;
+}
+
+static int AutoTileOwnedWindowStable(const ATGOwnedOperation *op, unsigned i)
+{
+    unsigned window_state=op->states[i];
+    int minimized=window_state==ATG_OWNED_MINIMIZED;
+    return (window_state==ATG_OWNED_PARTICIPATING || minimized)
+        && !!IsIconic(op->pins[i].hwnd)==minimized
+        && ATGOwnedWindowMatches(&op->profiles[i], &op->pins[i])
+        && !!IsIconic(op->pins[i].hwnd)==minimized;
 }
 
 static int AutoTileOwnedCheck(ATGOwnedOperation *op)
@@ -76,7 +92,7 @@ static int AutoTileOwnedCheck(ATGOwnedOperation *op)
             if (op->pins[i].hwnd) goto failed;
             continue;
         }
-        if (op->matches[i]!=1 || !ATGOwnedWindowMatches(p, &op->pins[i])) goto failed;
+        if (op->matches[i]!=1 || !AutoTileOwnedWindowStable(op, i)) goto failed;
         /* Duplicate enabled registrations must not authorize the same HWND. */
         for (j=0; j<i; ++j)
             if (op->profiles[j].enabled && op->pins[j].hwnd==op->pins[i].hwnd) goto failed;
@@ -84,7 +100,7 @@ static int AutoTileOwnedCheck(ATGOwnedOperation *op)
             TCHAR digest[65];
             if (!ATGOwnedImageOpen(p->path, digest, &op->images[i]) || lstrcmp(digest, p->digest)) goto failed;
         }
-        if (!ATGOwnedImageStable(&op->images[i])) goto failed;
+        if (!ATGOwnedImageStable(&op->images[i]) || !AutoTileOwnedWindowStable(op, i)) goto failed;
     }
     op->initialized=1;
     return 1;
@@ -93,16 +109,16 @@ failed:
     return 0;
 }
 
-/* Return 1 for an authorized participant, 0 for an unrelated window, -1 after
-   a lost witness. Rollback may still restore unrelated safe participants. */
+/* Return 1 for an authorized participant, 0 for an unrelated or verified
+   minimized window, -1 after a lost witness. Rollback may still restore peers. */
 static int AutoTileOwnedParticipant(ATGOwnedOperation *op, HWND hwnd)
 {
     unsigned i;
     if (!op) return 0;
     for (i=0; i<ATG_OWNED_SLOTS; ++i) if (op->pins[i].hwnd==hwnd) {
-        if (op->failed || !ATGOwnedWindowMatches(&op->profiles[i], &op->pins[i])
+        if (op->failed || !AutoTileOwnedWindowStable(op, i)
             || !ATGOwnedImageStable(&op->images[i])) { op->failed=1; return -1; }
-        return 1;
+        return op->states[i]==ATG_OWNED_PARTICIPATING;
     }
     return 0;
 }

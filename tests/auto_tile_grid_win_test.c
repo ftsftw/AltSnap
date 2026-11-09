@@ -93,6 +93,7 @@ static int selected_batch_effect;
 static int selected_dialog_during_limits;
 static int ordinary_dialog_during_limits;
 static int profile_limit_effect, profile_batch_effect;
+static unsigned iconic_reads, iconic_flip_at, capture_flip_at;
 static unsigned image_epoch;
 static const char *model_class, *model_image, *model_owner_class;
 static int enumerate_owner;
@@ -174,7 +175,11 @@ static int IsWindowEnabled(HWND w) { return win(w)->enabled; }
 static int IsWindowVisible(HWND w) { ++diagnostic_queries; return win(w)->visible; }
 static int IsWindowCloaked(HWND w) { ++diagnostic_queries; return win(w)->cloaked; }
 static int HasWindowSizeZero(HWND w) { ++diagnostic_queries; return win(w)->zero; }
-static int IsIconic(HWND w) { ++diagnostic_queries; return win(w)->iconic; }
+static int IsIconic(HWND w) {
+    ++diagnostic_queries;
+    if (w==1 && ++iconic_reads==iconic_flip_at) fake[0].iconic=!fake[0].iconic;
+    return win(w)->iconic;
+}
 static int GetBorderlessFlag(HWND w) { ++diagnostic_queries; return win(w)->borderless; }
 static int IsSnapCandidate(HWND w)
 {
@@ -306,6 +311,7 @@ static int GetMinMaxInfoF(HWND w, POINT *lo, POINT *hi, int ignore)
         if (profile_limit_effect==7) owner_thread_changed=1;
         if (profile_limit_effect==8) { fake[0].enabled=0; fake_owner.enabled=0; }
         if (profile_limit_effect==9) ++image_epoch;
+        if (profile_limit_effect==10) fake[0].iconic=!fake[0].iconic;
     }
     return !win(w)->min_fail;
 }
@@ -323,6 +329,7 @@ static int EnumDesktopWindows(void *desktop, BOOL (*callback)(HWND,LPARAM), LPAR
     }
     if (enumerate_owner && !callback(102,lp)) return 0;
     if (enumerate_owner && fake_owner2.visible && !callback(103,lp)) return 0;
+    if (captures==capture_flip_at) fake[0].iconic=!fake[0].iconic;
     return 1;
 }
 static BOOL EnumWindows(BOOL (*callback)(HWND,LPARAM), LPARAM lp)
@@ -350,6 +357,7 @@ static BOOL EnumWindows(BOOL (*callback)(HWND,LPARAM), LPARAM lp)
         if (selected_effect==14) relation_popup=102;
         if (selected_effect==15) relation_rootowner=102;
         if (selected_effect==16) fake[0].style|=WS_POPUP;
+        if (selected_effect==17) fake[0].iconic=!fake[0].iconic;
     }
     return 1;
 }
@@ -386,6 +394,7 @@ static int EndDeferWindowPos(HDWP b)
     if (profile_batch_effect==1) fake[0].owned=2;
     if (profile_batch_effect==2) model_class="ChangedMain";
     if (profile_batch_effect==3) model_owner_class="ChangedOwner";
+    if (profile_batch_effect==4) fake[0].iconic=!fake[0].iconic;
     if (cancel_batch) ++generation;
     if (start_drag) state.action.ac=1;
     return !fail_batch;
@@ -518,6 +527,7 @@ static void reset(unsigned n)
     selected_dialog_during_limits=0;
     ordinary_dialog_during_limits=0;
     profile_limit_effect=profile_batch_effect=0;
+    iconic_reads=iconic_flip_at=capture_flip_at=0;
     model_class=model_image=model_owner_class=NULL; foreground_queries=0; enumerate_owner=0;
     mem00(auto_tile_owned_profiles,sizeof auto_tile_owned_profiles); auto_tile_owned_enabled=0;
     mem00(ini_values,sizeof ini_values); ini_reads=ini_writes=0; ini_fail_write=0;
@@ -1453,13 +1463,201 @@ static void registered_profile_layouts(void)
         invoke(); assert(positions==1 && EqualRect(&fake[1].native,&fake[1].original));
     }
 }
+static void registered_minimized_regression(void)
+{
+    ATGOwnedOperation op;
+    ATGSnapshot snapshot;
+    int ok;
+    profile_setup(4,1,1); fake[0].iconic=1;
+    mem00(&op,sizeof op); op.monitor=1;
+    memcpy(op.profiles,auto_tile_owned_profiles,sizeof op.profiles);
+    assert(AutoTileOwnedCheck(&op) && op.pins[0].hwnd==1);
+    assert(op.states[0]==ATG_OWNED_MINIMIZED && !AutoTileOwnedParticipant(&op,1));
+    ok=AutoTileCaptureOwned(1,&snapshot,NULL,&op);
+    if (!ok) fprintf(stderr,"minimized profile regression: captured=%u failed=%d\n%s",snapshot.count,op.failed,trace_log);
+    assert(ok && snapshot.count==3);
+    assert(!strstr(trace_log,"profile-not-captured"));
+    /* Restoring does not admit a new participant halfway through this call. */
+    fake[0].iconic=0; assert(!AutoTileOwnedCheck(&op) && op.failed);
+    fake[0].iconic=1; assert(!AutoTileOwnedCheck(&op)); /* Failure latches. */
+    AutoTileOwnedClose(&op);
+}
+
+static void registered_minimized_layouts(void)
+{
+    unsigned trace, peers, cycle, i, kind, minimized, at;
+    for (trace=0;trace<=1;++trace) {
+        /* Presence and participation differ. A fresh invocation restores
+           participation automatically, without foreground or new enrollment. */
+        for (peers=0;peers<=4;++peers) {
+            profile_setup(peers+1,trace,1);
+            for (cycle=0;cycle<6;++cycle) {
+                unsigned moved=positions, cleared=clears;
+                int inactive=!(cycle%2);
+                for (i=0;i<count;++i) {
+                    fake[i].native=fake[i].original;
+                    fake[i].placement=fake[i].original_placement;
+                }
+                fake[0].iconic=inactive;
+                invoke();
+                if (inactive || peers<4) {
+                    unsigned expected=peers+!inactive;
+                    assert(positions==moved+expected && clears==cleared+expected);
+                } else assert(positions==moved && clears==cleared); /* Five active. */
+                if (inactive || peers==4) assert(EqualRect(&fake[0].native,&fake[0].original));
+                assert(!normalizes && !restores && !foreground_queries && !image_live);
+                assert(image_opens==image_closes);
+                if (!trace) assert(!trace_lines);
+            }
+        }
+        /* Closed/absent and disabled registrations retain the old peer path. */
+        profile_setup(4,trace,1);
+        fake[0].visible=fake_owner.visible=0; owned_exists=owner_exists=0;
+        invoke(); assert(positions==3 && image_opens==1 && !image_live); /* Enrollment only. */
+        /* Inactive mains are not sized, normalized or tested as participants;
+           their profile identity/topology is nevertheless still required. */
+        for (kind=0;kind<6;++kind) {
+            profile_setup(4,trace,1); fake[0].iconic=1;
+            if (kind<3) fake[0].blacklisted=(int)kind+1;
+            if (kind==3) fake[0].min_fail=1;
+            if (kind==4) fake[0].dpi=120;
+            if (kind==5) fake[0].lo.x=1800;
+            invoke(); assert(positions==3 && !normalizes && !image_live);
+            assert(EqualRect(&fake[0].native,&fake[0].original));
+        }
+        for (kind=0;kind<2;++kind) {
+            unsigned scans, reads, opens;
+            profile_setup(5,trace,0); fake[0].iconic=1;
+            if (kind) { mem00(auto_tile_owned_profiles,sizeof auto_tile_owned_profiles); }
+            scans=selected_scans; reads=ini_reads; opens=image_opens;
+            invoke(); assert(positions==4 && !foreground_queries && selected_scans==scans);
+            assert(reads==ini_reads && opens==image_opens);
+        }
+        /* Minimization never excuses bad identity, build, classes or owner. */
+        for (kind=0;kind<16;++kind) {
+            profile_setup(4,trace,1); fake[0].iconic=1;
+            if (kind==0) image_digest[0]='b';
+            if (kind==1) image_open_fail=1;
+            if (kind==2) model_class="ChangedMain";
+            if (kind==3) model_owner_class="ChangedOwner";
+            if (kind==4) fake[0].owned=2;
+            if (kind==5) fake_owner.pid++;
+            if (kind==6) fake[0].enabled=0;
+            if (kind==7) fake_owner.enabled=0;
+            if (kind==8) fake[0].name_fail=1;
+            if (kind==9) fake[0].exstyle=0;
+            if (kind==10) relation_popup=102;
+            if (kind==11) { strcpy(ini_values[0][ini_key("Schema")],"99"); AutoTileOwnedLoad("test.ini"); }
+            if (kind==12) owner_race=1;
+            if (kind==13) owner_race=2;
+            if (kind==14) fake_owner.visible=0;
+            if (kind==15) class_query_fail=1;
+            invoke(); unchanged(); assert(!positions && !normalizes && !clears && !image_live);
+        }
+        /* Visible modal/modeless/custom surfaces still block minimized mains,
+           even if the dialog is disabled, iconic or on another monitor. */
+        for (kind=0;kind<8;++kind) {
+            profile_setup(4,trace,1); fake[0].iconic=1;
+            fake[1].pid=1; fake[1].owned=1; fake[1].class_override="CustomDialog";
+            if (kind==0) { fake[1].class_override="#32770"; fake[0].enabled=fake_owner.enabled=0; }
+            if (kind==1) fake[1].enabled=0;
+            if (kind==2) fake[1].exstyle=WS_EX_TOOLWINDOW;
+            if (kind==3) fake[1].iconic=1;
+            if (kind==4) fake[1].monitor=2;
+            if (kind==5) fake[0].visible=0; /* Hidden main is not verified inactivity. */
+            if (kind==6) fake[1].class_override="TrustedMain";
+            if (kind==7) { fake[0].visible=0; fake[1].class_override="#32770"; }
+            invoke(); unchanged(); assert(!positions && !normalizes && !image_live);
+        }
+        /* State changes inside the profile scan/guard and after either capture
+           cancel, in both directions. A stable minimize before scanning works. */
+        for (minimized=0;minimized<=1;++minimized) {
+            for (at=1;at<=12;++at) {
+                profile_setup(4,trace,1); fake[0].iconic=(int)minimized;
+                iconic_reads=0; iconic_flip_at=at;
+                invoke();
+                if (at==1) assert(positions==3+minimized); /* Before the first observation. */
+                else { assert(!positions && !normalizes && !image_live); unchanged(); }
+            }
+            for (at=2;at<=4;++at) {
+                profile_setup(4,trace,1); fake[0].iconic=(int)minimized;
+                selected_effect=17; selected_effect_at=(int)selected_scans+(int)at;
+                invoke(); unchanged(); assert(!positions && !normalizes && !image_live);
+                assert(fake[0].iconic==!(int)minimized);
+            }
+            for (at=1;at<=2;++at) {
+                profile_setup(4,trace,1); fake[0].iconic=(int)minimized; capture_flip_at=at;
+                invoke(); unchanged(); assert(!positions && !normalizes && !image_live);
+            }
+            profile_setup(4,trace,1); fake[0].iconic=(int)minimized; profile_limit_effect=10;
+            invoke(); unchanged(); assert(!positions && !normalizes && !image_live);
+            /* After the batch, restore safe peers; do not undo the external
+               minimize/restore or force the profiled main's old geometry. */
+            profile_setup(4,trace,1); fake[0].iconic=(int)minimized; profile_batch_effect=4;
+            invoke(); assert(positions==4-minimized && restores==3 && !clears && !image_live);
+            assert(fake[0].iconic==!(int)minimized);
+            for (i=1;i<4;++i) assert(EqualRect(&fake[i].native,&fake[i].original));
+            /* A dialog during a peer's min/max callback also cancels inactivity. */
+            for (kind=1;kind<=2;++kind) {
+                profile_setup(4,trace,1); fake[0].iconic=(int)minimized;
+                ordinary_dialog_during_limits=(int)kind;
+                invoke(); unchanged(); assert(!positions && !normalizes && !image_live);
+            }
+        }
+        /* An inactive witness cannot be silently replaced by another HWND. */
+        {
+            ATGOwnedOperation op;
+            profile_setup(3,trace,1); fake[0].iconic=1;
+            mem00(&op,sizeof op); op.monitor=1;
+            memcpy(op.profiles,auto_tile_owned_profiles,sizeof op.profiles);
+            assert(AutoTileOwnedCheck(&op));
+            fake[0].visible=0; fake[1].pid=1; fake[1].owned=1;
+            fake[1].exstyle=WS_EX_APPWINDOW; fake[1].root_self=1;
+            fake[1].class_override="TrustedMain"; fake[1].iconic=1;
+            assert(!AutoTileOwnedCheck(&op) && op.pins[0].hwnd==1);
+            AutoTileOwnedClose(&op); unchanged();
+        }
+        /* Two independently registered apps may be active/inactive together. */
+        for (kind=0;kind<4;++kind) {
+            ATGOwnedProfile p;
+            profile_setup(4,trace,1);
+            fake[1].pid=55; fake[1].owned=2; fake[1].exstyle=WS_EX_APPWINDOW; fake[1].root_self=1;
+            fake[1].class_override="OtherMain"; fake[1].path_override="C:\\Apps\\Other.exe";
+            fake_owner2=fake_owner; fake_owner2.pid=55;
+            fake_owner2.class_override="OtherOwner"; fake_owner2.path_override="C:\\Apps\\Other.exe";
+            assert(ATGOwnedEnroll(2,&p));
+            assert(ATGOwnedProfileSave("test.ini",1,&p) && ATGOwnedProfileEnable("test.ini",1,1));
+            AutoTileOwnedLoad("test.ini");
+            fake[0].iconic=!!(kind&1); fake[1].iconic=!!(kind&2);
+            invoke(); assert(positions==4u-!!(kind&1)-!!(kind&2) && !image_live);
+            if (kind&1) assert(EqualRect(&fake[0].native,&fake[0].original));
+            if (kind&2) assert(EqualRect(&fake[1].native,&fake[1].original));
+        }
+        /* Peers still obey blacklists/min-max and guarded rollback. */
+        for (kind=1;kind<=3;++kind) {
+            profile_setup(5,trace,1); fake[0].iconic=1; fake[1].blacklisted=(int)kind;
+            invoke(); assert(positions==3 && EqualRect(&fake[0].native,&fake[0].original));
+            assert(EqualRect(&fake[1].native,&fake[1].original));
+        }
+        profile_setup(5,trace,1); fake[0].iconic=1; fake[1].lo.x=1800;
+        invoke(); unchanged(); assert(!positions && !normalizes);
+        profile_setup(5,trace,1); fake[0].iconic=1; fake[1].behavior=1;
+        invoke(); unchanged(); assert(positions==4 && restores==4 && !clears);
+        profile_setup(5,trace,1); fake[0].iconic=1; maximize(1); fail_batch=1;
+        invoke(); unchanged(); assert(normalizes==1 && max_restores==1 && !clears);
+        /* Selected keeps its independent foreground and eligibility contract. */
+        profile_setup(4,trace,1); fake[0].iconic=1; foreground=1;
+        invoke_selected(); unchanged(); assert(!positions && !normalizes);
+    }
+}
 int main(void)
 {
     layouts_and_refusals(); exclusions(); recovery_and_drag(); maximized_and_overhang(); diagnostic_trace(); limited_fallback_and_owner_safety();
     owner_topology_trace();
     explicitly_selected_owned();
     owned_role_ambiguity(); ordinary_owned_refusals();
-    profile_store_tests(); registered_profile_layouts();
+    profile_store_tests(); registered_profile_layouts(); registered_minimized_regression(); registered_minimized_layouts();
+    puts("auto_tile_grid_minimized_profiles: inactive witnesses, 1-4 peers, repeated restore, state/identity races, dialogs, mixed profiles and rollback passed (no Windows GUI)");
     puts("auto_tile_grid_profiles: disabled consent persistence, build/class checks, foreground-independent layouts, ambiguous/dialog refusals and guarded rollback passed");
     puts("auto_tile_grid_owned_roles: synthetic EXE/class role collision, ordinary focus-independent owner refusal, dialog states, peers and rollback passed (no implicit admission without registered consent)");
     puts("auto_tile_grid_selected: one-shot selection, strict guards, modal/modeless dialogs, stale identities, blacklists, five windows and guarded rollback passed (no Windows GUI)");
