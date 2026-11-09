@@ -23,4 +23,13 @@ typedef struct {
    fit signed 32-bit Win32 arguments. Output is untouched on failure.
    Input and output must not overlap. */
 int atg_plan(const ATGWindow *windows, size_t count, LGRect work, ATGPlan *plan);
+
+enum { ATG_EXPAND_HORIZONTAL = 1, ATG_EXPAND_VERTICAL = 2, ATG_EXPAND_BOTH = 3 };
+/* Expand an existing exact 2x2 covering work; preserve participant positions.
+   active is an input index, axes is a nonzero combination above. Current sizes
+   must be valid. Uses all four participants' limits and Win32 native bounds.
+   Unselected axes stay fixed; repeated calls are fixed points. No side effects;
+   output is untouched on refusal. */
+int atg_expand(const ATGWindow *windows, size_t count, size_t active,
+               LGRect work, unsigned axes, ATGPlan *plan);
 #endif

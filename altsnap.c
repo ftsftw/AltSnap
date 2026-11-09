@@ -31,6 +31,8 @@ static BYTE WinVer = 0;
 #define ENABLED() (!!G_HooksWinPorc)
 #define GetWindowRectL(hwnd, rect) GetWindowRectLL(hwnd, rect, SnapGap)
 static void UpdateSettings();
+static int HookSystem(void);
+static int UnhookSystem(void);
 
 // Include stuff
 #include "languages.c"
@@ -388,6 +390,13 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 G_HooksWinPorc(hwnd, WM_SETLAYOUTNUM, LayoutNumber, 0);
             }
         }
+    } else if (msg == WM_SHORTCUTERROR) {
+        #define ACVALUE(a, b, c) TEXT(#b),
+        static const TCHAR *const names[] = { ACTION_MAP };
+        #undef ACVALUE
+        unsigned action = LOWORD(wParam);
+        ShortcutRegistrationError(g_cfgwnd, action < ARR_SZ(names) ? names[action] : TEXT("KBShortcuts"),
+                                  HIWORD(wParam), (DWORD)lParam, NULL);
     } else if (msg == WM_HOTKEY || msg == WM_STACKLIST /*|| msg == WM_POWERBROADCAST*/) {
         if (G_HooksWinPorc)
             return G_HooksWinPorc(hwnd, msg, wParam, lParam);

@@ -1,5 +1,18 @@
 # AutoTileGrid (experimental MVP)
 
+## Keyboard grid proportions (Q/E/W/S)
+
+The current keyboard actions and safe portable migration instructions are in
+[GRID_KEYBOARD_TEST_BUILD_RU.md](GRID_KEYBOARD_TEST_BUILD_RU.md). AutoTileGrid,
+AutoTileExpandBoth, AutoTileExpandHorizontal and AutoTileExpandVertical are now
+available unassigned in Keyboard → Shortcut for action, with English/Russian
+labels. Suggested chords are Ctrl+Alt+S/Q/E/W; existing INI assignments are never
+migrated automatically. Expansion uses foreground and its monitor; ordinary
+AutoTileGrid retains cursor-monitor selection. The sections below document the
+previous implementation and historical tests; older G/INI-only setup instructions
+are superseded by the GUI instructions linked above.
+
+
 ## Windows 10 first test
 
 1. Open [GitHub Actions](https://github.com/ftsftw/AltSnap/actions/workflows/linked-grid-win64-test.yml),

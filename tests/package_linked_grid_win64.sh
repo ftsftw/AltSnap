@@ -28,7 +28,7 @@ for source in ['AltSnap.dni'] + [n for n in languages if n.endswith('.ini')]:
     (stage / member).write_bytes(b'\xff\xfe' + text.encode('utf-16le'))
 PY
 if [[ "$package" == AltSnap-auto-tile-win64-test ]]; then
-    cp AUTO_TILE_GRID.md "$stage/"
+    cp AUTO_TILE_GRID.md GRID_KEYBOARD_TEST_BUILD_RU.md "$stage/"
 fi
 python3 - "$stage/AltSnap.ini" <<'PY'
 import pathlib, re, sys
@@ -55,6 +55,7 @@ with zipfile.ZipFile(archive) as z:
     required = {root + n for n in ('AltSnap.exe','hooks.dll','AltSnap.ini','License.txt')}
     if sys.argv[2] == 'AltSnap-auto-tile-win64-test':
         required.add(root + 'AUTO_TILE_GRID.md')
+        required.add(root + 'GRID_KEYBOARD_TEST_BUILD_RU.md')
     assert required <= names, required - names
     languages = subprocess.check_output(
         ['git', 'ls-tree', '-r', '--name-only', 'HEAD', 'Lang/'], text=True

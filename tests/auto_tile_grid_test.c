@@ -298,8 +298,151 @@ static void oracle(void)
     }
 }
 
+
+static void expand_grid(ATGWindow w[4], LGRect work, int x, int y)
+{
+    size_t i;
+    for (i=0;i<4;++i) {
+        LGRect r = { i&1 ? x : work.left, i&2 ? y : work.top,
+                     i&1 ? work.right : x, i&2 ? work.bottom : y };
+        w[i]=window_at(r, i+1);
+        w[i].border=(LGRect){7,0,8,9};
+    }
+}
+static void adopt(ATGWindow w[4], const ATGPlan *p)
+{
+    size_t i;
+    for(i=0;i<4;++i) w[p->indices[i]].window.rect=p->visible[i];
+}
+static void expansions(void)
+{
+    LGRect work={-901,37,1100,1038};
+    unsigned q, axes, proportions;
+    for(proportions=0;proportions<3;++proportions) for(q=0;q<4;++q) for(axes=1;axes<=3;++axes) {
+        ATGWindow w[4]; ATGPlan p, again, uniform;
+        int x=-200+(int)proportions*330, y=300+(int)proportions*120;
+        size_t i;
+        expand_grid(w,work,x,y);
+        for(i=0;i<4;++i) {
+            w[i].window.min_width=130+(int)i*17;
+            w[i].window.min_height=140+(int)i*11;
+            w[i].window.max_width=1700-(int)i*13;
+            w[i].window.max_height=900-(int)i*7;
+        }
+        assert(atg_expand(w,4,q,work,axes,&p));
+        assert_plan(w,4,work,&p);
+        for(i=0;i<4;++i) assert(p.indices[i]==i);
+        if (!(axes&1)) assert(p.visible[0].right==x);
+        if (!(axes&2)) assert(p.visible[0].bottom==y);
+        /* Extremum independently constrained by all four minima/maxima. */
+        if (axes&1) assert(p.visible[0].right==(q&1 ? work.right-1661 : work.left+1674));
+        if (axes&2) assert(p.visible[0].bottom==(q&2 ? work.top+151 : work.bottom-173));
+        adopt(w,&p);
+        assert(atg_expand(w,4,q,work,axes,&again));
+        assert(!memcmp(&p,&again,sizeof p));
+        /* Linked resize can still recognize and resize the result. */
+        {
+            LGWindow linked[4]; LGResult r;
+            for(i=0;i<4;++i) linked[i]=w[i].window;
+            assert(lg_resize(linked,4,q,(LGQuadrant)q,100,550,&r)==LG_OK);
+        }
+        assert(atg_plan(w,4,work,&uniform));
+        for(i=0;i<4;++i) assert(uniform.indices[i]==i);
+        assert(uniform.visible[0].right==99 && uniform.visible[0].bottom==537);
+        /* Q/E/W combinations retain the same simultaneous extremum. */
+        assert(atg_expand(w,4,q,work,3,&p)); adopt(w,&p);
+        assert(atg_expand(w,4,q,work,1,&again)); adopt(w,&again);
+        assert(atg_expand(w,4,q,work,2,&again));
+        assert(!memcmp(&p,&again,sizeof p));
+    }
+    /* Brute-force independent feasible-split oracle, varying all limits. */
+    for(proportions=0;proportions<256;++proportions) for(q=0;q<4;++q) for(axes=1;axes<=3;++axes) {
+        LGRect small={-11,-13,9,5};
+        ATGWindow w[4], perm[4]; ATGPlan p;
+        int x,y,bx=0,by=0,found=0,expected,actual;
+        size_t i, active=0;
+        expand_grid(w,small,-3,-5);
+        for(i=0;i<4;++i) {
+            w[i].window.min_width=1+(int)((proportions>>(i*2))&3)*2;
+            w[i].window.min_height=1+(int)((proportions>>i)&3)*2;
+            w[i].window.max_width=8+(int)((proportions>>(i+1))&3)*3;
+            w[i].window.max_height=8+(int)((proportions>>(i+2))&3)*2;
+        }
+        expected=1;
+        for(i=0;i<4;++i) {
+            LGWindow a=w[i].window;
+            int rw=a.rect.right-a.rect.left,rh=a.rect.bottom-a.rect.top;
+            if(rw<a.min_width || rw>a.max_width || rh<a.min_height || rh>a.max_height) expected=0;
+        }
+        for(x=small.left+1;x<small.right;++x) for(y=small.top+1;y<small.bottom;++y) {
+            int valid=1;
+            if(!(axes&1) && x!=-3) continue;
+            if(!(axes&2) && y!=-5) continue;
+            for(i=0;i<4;++i) {
+                int rw=i&1 ? small.right-x : x-small.left;
+                int rh=i&2 ? small.bottom-y : y-small.top;
+                LGWindow a=w[i].window;
+                if(rw<a.min_width || rw>a.max_width || rh<a.min_height || rh>a.max_height) valid=0;
+            }
+            if(valid) {
+                if(!found || (q&1 ? x<bx : x>bx)) bx=x;
+                if(!found || (q&2 ? y<by : y>by)) by=y;
+                found=1;
+            }
+        }
+        for(i=0;i<4;++i) { perm[i]=w[3-i]; if(perm[i].key==q+1) active=i; }
+        actual=atg_expand(perm,4,active,small,axes,&p);
+        assert(actual==(expected && found));
+        if(actual) { assert(p.visible[0].right==bx && p.visible[0].bottom==by); assert_plan(perm,4,small,&p); }
+    }
+}
+static void expand_refusals(void)
+{
+    LGRect work={0,0,1200,960}; ATGWindow w[5]; ATGPlan p,sentinel;
+    unsigned kind;
+    memset(&sentinel,0xa5,sizeof sentinel);
+    for(kind=0;kind<16;++kind) {
+        expand_grid(w,work,600,480); w[4]=window_at(work,5); p=sentinel;
+        switch(kind) {
+        case 0: w[1].window.rect.left++; break;
+        case 1: w[1].window.rect.left--; break;
+        case 2: w[3].window.rect.bottom--; break;
+        case 3: w[2].window.min_width=601; break;
+        case 4: w[1].window.max_height=479; break;
+        case 5: w[0].window.min_width=0; break;
+        case 6: w[0].window.max_width=0; break;
+        case 7: w[0].border.left=-1; break;
+        case 8: w[0].border.right=INT32_MAX; break;
+        case 9: w[1].key=w[0].key; break;
+        case 10: w[2].window.rect=w[0].window.rect; break;
+        case 11: w[3].window.rect.left=INT32_MIN; break;
+        case 12: w[0].window.min_width=700; w[1].window.min_width=700; break;
+        case 13: w[0].window.rect.right=w[0].window.rect.left; break;
+        case 14: w[0].window.max_width=500; w[1].window.max_width=500; break;
+        case 15: w[0].border.bottom=INT32_MAX; break;
+        }
+        assert(!atg_expand(w,4,0,work,3,&p)); assert(!memcmp(&p,&sentinel,sizeof p));
+    }
+    expand_grid(w,work,600,480);
+    assert(!atg_expand(w,5,0,work,3,&p));
+    assert(!atg_expand(w,3,0,work,3,&p));
+    assert(!atg_expand(w,4,4,work,3,&p));
+    assert(!atg_expand(w,4,0,work,0,&p));
+    assert(!atg_expand(w,4,0,work,4,&p));
+    assert(!atg_expand(NULL,4,0,work,3,&p));
+    assert(!atg_expand(w,4,0,work,3,NULL));
+    /* Coordinate bounds constrain the extremum before native conversion. */
+    work=(LGRect){INT32_MIN+20,INT32_MIN+20,INT32_MIN+1020,INT32_MIN+820};
+    expand_grid(w,work,work.left+500,work.top+400);
+    w[1].border.left=200; w[3].border.left=200;
+    assert(atg_expand(w,4,1,work,1,&p)); assert(p.visible[0].right==INT32_MIN+200);
+    assert_plan(w,4,work,&p);
+}
+
 int main(void)
 {
+    expansions();
+    expand_refusals();
     layouts();
     failures();
     limits_and_borders();

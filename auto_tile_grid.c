@@ -97,3 +97,73 @@ int atg_plan(const ATGWindow *windows, size_t count, LGRect work, ATGPlan *plan)
     *plan = best;
     return 1;
 }
+
+int atg_expand(const ATGWindow *windows, size_t count, size_t active,
+               LGRect work, unsigned axes, ATGPlan *plan)
+{
+    LGWindow w[4];
+    LGResult grid;
+    ATGPlan next;
+    LGRect a;
+    size_t i, j;
+    unsigned q;
+    int32_t x, y;
+    int64_t width = (int64_t)work.right - work.left;
+    int64_t height = (int64_t)work.bottom - work.top;
+    if (!windows || !plan || count != 4 || active >= count || !axes
+        || (axes & ~ATG_EXPAND_BOTH) || width < 2 || height < 2
+        || width > INT32_MAX || height > INT32_MAX) return 0;
+    a = windows[active].window.rect;
+    q = (a.left == work.left ? 0u : 1u) | (a.top == work.top ? 0u : 2u);
+    for (i = 0; i < 4; ++i) {
+        LGRect r = windows[i].window.rect, b = windows[i].border, native;
+        int64_t rw = (int64_t)r.right - r.left, rh = (int64_t)r.bottom - r.top;
+        int64_t maxw, maxh;
+        w[i] = windows[i].window;
+        if (r.left < work.left || r.top < work.top
+            || r.right > work.right || r.bottom > work.bottom
+            || w[i].min_width < 1 || w[i].min_height < 1
+            || w[i].max_width < w[i].min_width || w[i].max_height < w[i].min_height
+            || rw < w[i].min_width || rw > w[i].max_width
+            || rh < w[i].min_height || rh > w[i].max_height
+            || b.left < 0 || b.top < 0 || b.right < 0 || b.bottom < 0
+            || !atg_native(r, b, &native)) return 0;
+        for (j = 0; j < i; ++j) if (windows[j].key == windows[i].key) return 0;
+        maxw = (int64_t)INT32_MAX - b.left - b.right;
+        maxh = (int64_t)INT32_MAX - b.top - b.bottom;
+        /* Also bound moving native coordinates, even near INT32 endpoints. */
+        if (r.left == work.left) {
+            int64_t bound = (int64_t)INT32_MAX - b.right - work.left;
+            if (bound < maxw) maxw = bound;
+        } else {
+            int64_t bound = (int64_t)work.right - b.left - INT32_MIN;
+            if (bound < maxw) maxw = bound;
+        }
+        if (r.top == work.top) {
+            int64_t bound = (int64_t)INT32_MAX - b.bottom - work.top;
+            if (bound < maxh) maxh = bound;
+        } else {
+            int64_t bound = (int64_t)work.bottom - b.top - INT32_MIN;
+            if (bound < maxh) maxh = bound;
+        }
+        if (maxw < w[i].min_width || maxh < w[i].min_height) return 0;
+        if (maxw < w[i].max_width) w[i].max_width = (int32_t)maxw;
+        if (maxh < w[i].max_height) w[i].max_height = (int32_t)maxh;
+    }
+    x = (q & 1) ? a.left : a.right;
+    y = (q & 2) ? a.top : a.bottom;
+    if (lg_resize(w, 4, active, (LGQuadrant)q, x, y, &grid) != LG_OK
+        || grid.x != x || grid.y != y
+        || grid.rects[0].left != work.left || grid.rects[0].top != work.top
+        || grid.rects[3].right != work.right || grid.rects[3].bottom != work.bottom) return 0;
+    if (axes & ATG_EXPAND_HORIZONTAL) x = (q & 1) ? INT32_MIN : INT32_MAX;
+    if (axes & ATG_EXPAND_VERTICAL) y = (q & 2) ? INT32_MIN : INT32_MAX;
+    if (lg_resize(w, 4, active, (LGQuadrant)q, x, y, &grid) != LG_OK) return 0;
+    for (i = 0; i < 4; ++i) {
+        next.indices[i] = grid.indices[i];
+        next.visible[i] = grid.rects[i];
+        if (!atg_native(grid.rects[i], windows[grid.indices[i]].border, &next.native[i])) return 0;
+    }
+    *plan = next;
+    return 1;
+}

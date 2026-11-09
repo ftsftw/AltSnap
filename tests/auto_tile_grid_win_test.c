@@ -1650,8 +1650,98 @@ static void registered_minimized_layouts(void)
         invoke_selected(); unchanged(); assert(!positions && !normalizes);
     }
 }
+
+static void expansion_baseline(int profile)
+{
+    unsigned i;
+    if (profile) profile_setup(4,0,1); else reset(4);
+    invoke(); assert(positions==4);
+    for(i=0;i<4;++i) { fake[i].original=fake[i].native; fake[i].original_placement=fake[i].placement; }
+    captures=positions=restores=batches=clears=0;
+    foreground=1;
+}
+static void expand_adapter(void)
+{
+    unsigned q,axes,profile,kind,i;
+    for(profile=0;profile<=1;++profile) for(q=0;q<4;++q) for(axes=1;axes<=3;++axes) {
+        RECT first[4]; unsigned moved;
+        expansion_baseline((int)profile); foreground=q+1;
+        reverse_enum=1;
+        AutoTileExpand(axes);
+        assert(positions && batches==1 && clears==4 && !normalizes && !restores);
+        assert(!image_live);
+        for(i=0;i<4;++i) {
+            RECT r;
+            first[i]=fake[i].native;
+            assert(!DwmGetWindowAttributeL(i+1,9,&r,sizeof r));
+            assert(r.left>=0 && r.top>=0 && r.right<=1200 && r.bottom<=960);
+            if(!(axes&1)) assert(r.left==(i&1 ? 600 : 0) && r.right==(i&1 ? 1200 : 600));
+            if(!(axes&2)) assert(r.top==(i&2 ? 480 : 0) && r.bottom==(i&2 ? 960 : 480));
+        }
+        moved=positions;
+        AutoTileExpand(axes); assert(positions==moved && batches==1);
+        for(i=0;i<4;++i) assert(EqualRect(&first[i],&fake[i].native));
+        AutoTileExpand(3); AutoTileExpand(1); AutoTileExpand(2);
+        invoke();
+        for(i=0;i<4;++i) assert(EqualRect(&fake[i].native,&fake[i].original));
+    }
+    for(profile=0;profile<=1;++profile) for(kind=0;kind<19;++kind) {
+        expansion_baseline((int)profile);
+        switch(kind) {
+        case 0: foreground=0; break;
+        case 1: foreground=102; break; /* Owner is never promoted to main. */
+        case 2: fake[0].iconic=1; break;
+        case 3: fake[2].iconic=1; break;
+        case 4: fake[1].enabled=0; break;
+        case 5: fake[1].native.left++; break;
+        case 6: fake[0].dpi=120; break;
+        case 7: fake[2].lo.x=800; break;
+        case 8: fake[3].hi.y=100; break;
+        case 9: fake[1].monitor=2; break;
+        case 10: maximize(0); break;
+        case 11: fake[2].min_fail=1; break;
+        case 12: state.action.ac=1; break;
+        case 13: linked_queue.busy=1; break;
+        case 14: change_preflight=1; break;
+        case 15: fake[0].placement.showCmd=SW_SHOWMAXIMIZED; break;
+        case 16: capture_flip_at=2; break;
+        case 17: ordinary_dialog_during_limits=1; break;
+        case 18: fake[1].owned=1; break;
+        }
+        AutoTileExpand(3); assert(!positions && !normalizes && !restores && !image_live);
+    }
+    for(kind=0;kind<4;++kind) {
+        reset(kind); foreground=kind ? 1 : 0; AutoTileExpand(3); unchanged(); assert(!positions);
+    }
+    reset(5); foreground=1; AutoTileExpand(3); unchanged(); assert(!positions);
+    /* A fifth eligible surface cancels even when four still form a grid. */
+    expansion_baseline(0); count=5; fake[4]=fake[3]; foreground=1;
+    AutoTileExpand(3); assert(!positions);
+    expansion_baseline(0); count=5; fake[4]=fake[3]; fake[4].visible=0; foreground=5;
+    AutoTileExpand(3); assert(!positions); /* Same monitor, foreground is no participant. */
+    for(profile=0;profile<=1;++profile) for(kind=0;kind<5;++kind) {
+        expansion_baseline((int)profile);
+        if(kind==0) fail_begin=1;
+        if(kind==1) fail_defer=1;
+        if(kind==2) fail_batch=1;
+        if(kind==3) fake[2].behavior=1; /* Application clamps during batch. */
+        if(kind==4) selected_batch_effect=4; /* Foreground changes during apply. */
+        AutoTileExpand(3); unchanged(); assert(!clears && !normalizes && !image_live);
+    }
+    /* Registered build/profile witness changes cancel before apply. */
+    for(kind=1;kind<=10;++kind) {
+        expansion_baseline(1); profile_limit_effect=(int)kind;
+        AutoTileExpand(3); unchanged(); assert(!positions && !image_live);
+    }
+    /* Valid nonuniform grid, foreground among peers of registered main. */
+    expansion_baseline(1); foreground=4; AutoTileExpand(1); foreground=2; AutoTileExpand(2);
+    positions=0; foreground=1; AutoTileExpand(3); assert(positions && !image_live);
+    puts("auto_tile_expand_win_stubs: foreground, four corners, nonuniform grids, registered profiles, modal/minimize/state refusals and batch rollback passed (no Windows GUI)");
+}
+
 int main(void)
 {
+    expand_adapter();
     layouts_and_refusals(); exclusions(); recovery_and_drag(); maximized_and_overhang(); diagnostic_trace(); limited_fallback_and_owner_safety();
     owner_topology_trace();
     explicitly_selected_owned();

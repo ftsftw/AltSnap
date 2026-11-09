@@ -1109,6 +1109,29 @@ static BOOL CALLBACK EnableAllControlsProc(HWND hwnd, LPARAM lp)
     }
     return TRUE;
 }
+#include "kb_shortcuts.h"
+
+static void ShortcutRegistrationError(HWND owner, const TCHAR *action, WORD hk, DWORD error,
+                                       const TCHAR *conflict)
+{
+    TCHAR text[1024], key[64], number[16];
+    sb_t sb = { text, 0, ARR_SZ(text) };
+    key[0] = 0;
+    GetKeyNameText(MapVirtualKey(LOBYTE(hk), 0) << 16, key, ARR_SZ(key));
+    SbAppendStr(&sb, conflict && conflict[0] ? l10n->ShortcutDuplicate : l10n->ShortcutRegisterFailed);
+    SbAppendStr(&sb, TEXT("\n\n"));
+    SbAppendStr(&sb, action);
+    SbAppendStr(&sb, TEXT(": "));
+    if (HIBYTE(hk) & MOD_CONTROL) SbAppendStr(&sb, TEXT("Ctrl+"));
+    if (HIBYTE(hk) & MOD_ALT) SbAppendStr(&sb, TEXT("Alt+"));
+    if (HIBYTE(hk) & MOD_SHIFT) SbAppendStr(&sb, TEXT("Shift+"));
+    if (HIBYTE(hk) & MOD_WIN) SbAppendStr(&sb, TEXT("Win+"));
+    SbAppendStr(&sb, key);
+    if (conflict && conflict[0]) { SbAppendStr(&sb, TEXT("\n")); SbAppendStr(&sb, conflict); }
+    SbAppendStr(&sb, TEXT("\nWin32: ")); SbAppendStr(&sb, Uint2lStr(number, error));
+    MessageBox(owner, text, APP_NAME, MB_OK|MB_ICONWARNING);
+}
+
 static LRESULT WINAPI PickShortcutWinProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     static const UCHAR vkbl[] = {
@@ -1118,21 +1141,22 @@ static LRESULT WINAPI PickShortcutWinProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM
         VK_LWIN, VK_RWIN
         , '\0'
     };
-//    static int was_enabled;
+    static int was_enabled;
 
     switch (msg) {
-//    case WM_CREATE: {
-//        was_enabled = ENABLED();
-//        if (was_enabled) UnhookSystem();
-//    } break;
+    case WM_CREATE:
+        SetWindowLongPtr(hwnd, GWLP_USERDATA, 0);
+        was_enabled = ENABLED();
+        if (was_enabled) UnhookSystem();
+        break;
     case WM_CHAR:
-    case WM_SYSKEYDOWN:
-    case WM_SYSKEYUP:
     case WM_SYSDEADCHAR:
     case WM_SYSCHAR:
         break;
-    case WM_KEYUP: {
-        if (!IsHotkeyy((UCHAR)wp, vkbl)) {
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN: {
+        if (!GetWindowLongPtr(hwnd, GWLP_USERDATA) && !IsHotkeyy((UCHAR)wp, vkbl)) {
+            SetWindowLongPtr(hwnd, GWLP_USERDATA, wp);
             TCHAR txt[LPTR_HDIGITS+1];
             HWND phwnd = GetParent(hwnd);
             SetDlgItemText(phwnd, IDC_SHORTCUTS_VK, LPTR2Hex(txt, wp));
@@ -1141,9 +1165,12 @@ static LRESULT WINAPI PickShortcutWinProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM
             CheckDlgButton(phwnd, IDC_CONTROL,GetKeyState(VK_CONTROL)&0x8000? BST_CHECKED: BST_UNCHECKED);
             CheckDlgButton(phwnd, IDC_WINKEY, GetKeyState(VK_LWIN)&0x8000||GetKeyState(VK_RWIN)&0x8000? BST_CHECKED: BST_UNCHECKED);
             CheckDlgButton(phwnd, IDC_ALT,    GetKeyState(VK_MENU)&0x8000? BST_CHECKED: BST_UNCHECKED);
-            DestroyWindow(hwnd);
         }
     } break;
+    case WM_KEYUP:
+    case WM_SYSKEYUP:
+        if (GetWindowLongPtr(hwnd, GWLP_USERDATA) == (LONG_PTR)wp) DestroyWindow(hwnd);
+        break;
     case WM_LBUTTONDOWN:
     case WM_KILLFOCUS: {
         DestroyWindow(hwnd);
@@ -1159,7 +1186,7 @@ static LRESULT WINAPI PickShortcutWinProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM
         HWND sethwnd = GetDlgItem(phwnd, IDC_SHORTCUTS_SET);
         EnableWindow(sethwnd, TRUE);
         SetFocus(sethwnd);
-//        if (was_enabled) HookSystem();
+        if (was_enabled) { was_enabled = 0; HookSystem(); }
     } break;
     default:
         return DefWindowProc(hwnd, msg, wp, lp);
@@ -1330,8 +1357,11 @@ static INT_PTR CALLBACK AdvancedActionDlgProc(HWND hwnd, UINT msg, WPARAM wp, LP
 }
 
 /////////////////////////////////////////////////////////////////////////////
+#include "kb_shortcuts_ui.h"
+
 static INT_PTR CALLBACK KeyboardPageDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    int restore_hooks = 0;
     static int have_to_apply = 0;
     static int edit_shortcut_idx = 0;
     // Hotkeys
@@ -1363,6 +1393,10 @@ static INT_PTR CALLBACK KeyboardPageDialogProc(HWND hwnd, UINT msg, WPARAM wPara
         {NULL, 0}
     };
     static const actiondl_t kbshortcut_actions[] = {
+        {TEXT("AutoTileGrid"), L10NIDX(InputActionAutoTileGrid) },
+        {TEXT("AutoTileExpandBoth"), L10NIDX(InputActionAutoTileExpandBoth) },
+        {TEXT("AutoTileExpandHorizontal"), L10NIDX(InputActionAutoTileExpandHorizontal) },
+        {TEXT("AutoTileExpandVertical"), L10NIDX(InputActionAutoTileExpandVertical) },
         {TEXT("Kill"),        L10NIDX(InputActionKill) },
         {TEXT("Pause"),       L10NIDX(InputActionPause) },
         {TEXT("Resume"),      L10NIDX(InputActionResume) },
@@ -1470,7 +1504,9 @@ static INT_PTR CALLBACK KeyboardPageDialogProc(HWND hwnd, UINT msg, WPARAM wPara
         if (id == IDC_SHORTCUTS_AC && (event == CBN_SELCHANGE || event == CBN_EDITCHANGE)) {
             // Update the shortcut with the current one.
             TCHAR txt[64];
-            int i = CB_GetTextAndIdx((HWND)lParam, txt, ARR_SZ(txt));
+            txt[0] = 0;
+            int i = KBShortcutAction((HWND)lParam, kbshortcut_actions,
+                                     ARR_SZ(kbshortcut_actions)-1, txt, ARR_SZ(txt));
             edit_shortcut_idx = i;
             //MessageBox(hwnd, txt, NULL, 0);
             WORD shortcut = GetPrivateProfileInt(TEXT("KBShortcuts"), txt, 0, inipath);
@@ -1494,14 +1530,28 @@ static INT_PTR CALLBACK KeyboardPageDialogProc(HWND hwnd, UINT msg, WPARAM wPara
                      | (IsChecked(IDC_CONTROL)<<1)
                      | (IsChecked(IDC_SHIFT)<<2)
                      | (IsChecked(IDC_WINKEY)<<3);
-            WORD shortcut = vKey | (mod << 8);
-            action_string_buf[0] = TEXT('\0');
-            int astrlen = GetDlgItemText(hwnd, IDC_SHORTCUTS_AC, action_string_buf, ARR_SZ(action_string_buf));
-            if (0 < astrlen && *action_string_buf) {
-                const TCHAR *intstr = shortcut ? Uint2lStr(txt, shortcut) : NULL; // NULL will remove the KEY
-                edit_shortcut_idx = CB_AddStringIfNotPresentAndGetIdx(GetDlgItem(hwnd, IDC_SHORTCUTS_AC), action_string_buf);
-                WritePrivateProfileString(TEXT("KBShortcuts"), action_string_buf, intstr, inipath);
+            WORD shortcut = vKey ? vKey | (mod << 8) : 0;
+            TCHAR conflict[64]; conflict[0] = 0;
+            action_string_buf[0] = 0;
+            KBShortcutAction(GetDlgItem(hwnd, IDC_SHORTCUTS_AC), kbshortcut_actions,
+                             ARR_SZ(kbshortcut_actions)-1, action_string_buf, ARR_SZ(action_string_buf));
+            if (MapActionW(action_string_buf).ac == AC_NONE) {
+                MessageBox(hwnd, l10n->ShortcutInvalidAction, APP_NAME, MB_OK|MB_ICONWARNING);
+                return TRUE;
             }
+            restore_hooks = ENABLED();
+            if (restore_hooks) UnhookSystem();
+            DWORD error = KBShortcutSave(hwnd, inipath, action_string_buf, shortcut, conflict, ARR_SZ(conflict));
+            if (error) {
+                if (restore_hooks) HookSystem();
+                if (error == ERROR_WRITE_FAULT)
+                    MessageBox(hwnd, l10n->ShortcutSaveFailed, APP_NAME, MB_OK|MB_ICONWARNING);
+                else ShortcutRegistrationError(hwnd, action_string_buf, shortcut, error, conflict);
+                return TRUE;
+            }
+            edit_shortcut_idx = KBShortcutAddAction(GetDlgItem(hwnd, IDC_SHORTCUTS_AC),
+                kbshortcut_actions, ARR_SZ(kbshortcut_actions)-1, action_string_buf);
+            CB_SetCurSel(GetDlgItem(hwnd, IDC_SHORTCUTS_AC), edit_shortcut_idx);
             EnableDlgItem(hwnd, IDC_SHORTCUTS_SET, 0);
             SetFocus(GetDlgItem(hwnd, IDC_SHORTCUTS_AC));
             goto APPLY_ALL;
@@ -1554,7 +1604,7 @@ static INT_PTR CALLBACK KeyboardPageDialogProc(HWND hwnd, UINT msg, WPARAM wPara
             int code = DialogBoxParam(g_hinst, MAKEINTRESOURCE(IDD_ACTIONPARAM), hwnd, (DLGPROC)AdvancedActionDlgProc, (LPARAM)&acp);
             if (code == IDOK && acp.outbuf[0]) {
                 HWND control = GetDlgItem(hwnd, IDC_SHORTCUTS_AC);
-                int new_index = CB_AddStringIfNotPresentAndGetIdx(control, acp.outbuf);
+                int new_index = KBShortcutAddAction(control, kbshortcut_actions, ARR_SZ(kbshortcut_actions)-1, acp.outbuf);
                 CB_SetCurSel(control, new_index);
                 PostMessage(hwnd, WM_COMMAND, IDC_SHORTCUTS_AC|CBN_SELCHANGE<<16, (LPARAM)GetDlgItem(hwnd, IDC_SHORTCUTS_AC));
                 edit_shortcut_idx = new_index;
@@ -1574,22 +1624,9 @@ static INT_PTR CALLBACK KeyboardPageDialogProc(HWND hwnd, UINT msg, WPARAM wPara
             FillActionDropListS(hwnd, IDC_GRABWITHALT, TEXT("GrabWithAlt"), kb_actions);
             FillActionDropListS(hwnd, IDC_GRABWITHALTB, TEXT("GrabWithAltB"), kb_actions);
 
-            //FillActionDropListS(hwnd, IDC_SHORTCUTS_AC, NULL, kbshortcut_actions);
-            { // Fill combobox with all the shortcuts that are currently configured
-                TCHAR kbsec[1600];
-                HWND control = GetDlgItem(hwnd, IDC_SHORTCUTS_AC);
-                CB_ResetContent(control);
-                GetPrivateProfileSection(TEXT("KBShortcuts"), kbsec, ARR_SZ(kbsec), inipath);
-                for (TCHAR *p=kbsec; *p != TEXT('\0'); p += lstrlen(p) + 1) {
-                    //MessageBox(hwnd, p, TEXT("KBShortcuts"), 0);
-                    TCHAR *pp = lstrchr(p, TEXT('='));
-                    if(!pp) continue; // No equal sign...
-                    *pp = TEXT('\0');
-                    if (!lstrcmpi(p, TEXT("UsePtWindow")))
-                        continue;
-                    CB_AddString(control, p);
-                    p = pp+1;
-                }
+            if (!KBShortcutFill(GetDlgItem(hwnd, IDC_SHORTCUTS_AC), kbshortcut_actions,
+                                ARR_SZ(kbshortcut_actions)-1, inipath)) {
+                MessageBox(hwnd, l10n->ShortcutSaveFailed, APP_NAME, MB_OK|MB_ICONWARNING);
             }
             CB_SetCurSel(GetDlgItem(hwnd, IDC_SHORTCUTS_AC), edit_shortcut_idx);
             EnableDlgItem(hwnd, IDC_SHORTCUTS_SET, 0);
@@ -1660,6 +1697,7 @@ static INT_PTR CALLBACK KeyboardPageDialogProc(HWND hwnd, UINT msg, WPARAM wPara
             SaveHotKeys(hotkeys, hwnd, TEXT("Hotkeys"));
             WriteOptionBool(IDC_KEYCOMBO,  TEXT("Input"), "KeyCombo");
             UpdateSettings();
+            if (restore_hooks) HookSystem();
             have_to_apply = 0;
         }
     }

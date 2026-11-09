@@ -65,10 +65,10 @@ EXELD = $(LDFLAGS) \
 
 default: AltSnap.exe hooks.dll
 
-hooks.dll : hooks.c hooks.h hooksr.o unfuck.h window_process_name.h nanolibc.h zones.c snap.c linked_grid_win.h linked_grid.c linked_grid.h linked_grid_queue.h linked_grid_recovery.h auto_tile_grid_win.h auto_tile_grid.c auto_tile_grid.h auto_tile_owned_guard.h auto_tile_owned_store.h auto_tile_owned_image.h auto_tile_owned_match.h auto_tile_owned_runtime.h auto_tile_owned_ui.h
+hooks.dll : hooks.c hooks.h hooksr.o unfuck.h window_process_name.h nanolibc.h zones.c snap.c linked_grid_win.h linked_grid.c linked_grid.h linked_grid_queue.h linked_grid_recovery.h auto_tile_grid_win.h auto_tile_grid.c auto_tile_grid.h auto_tile_owned_guard.h auto_tile_owned_store.h auto_tile_owned_image.h auto_tile_owned_match.h auto_tile_owned_runtime.h auto_tile_owned_ui.h kb_shortcuts.h
 	$(CC) -o hooks.dll hooks.c hooks.res $(CFLAGS) $(LDFLAGS) -shared -e_DllMain@12 -v -Wl,--kill-at
 
-AltSnap.exe : altsnapr.o altsnap.c hooks.h tray.c config.c languages.h languages.c unfuck.h window_process_name.h nanolibc.h auto_tile_owned_guard.h auto_tile_owned_store.h auto_tile_owned_image.h auto_tile_owned_match.h auto_tile_owned_runtime.h auto_tile_owned_ui.h
+AltSnap.exe : altsnapr.o altsnap.c hooks.h tray.c config.c languages.h languages.c unfuck.h window_process_name.h nanolibc.h auto_tile_owned_guard.h auto_tile_owned_store.h auto_tile_owned_image.h auto_tile_owned_match.h auto_tile_owned_runtime.h auto_tile_owned_ui.h kb_shortcuts.h kb_shortcuts_ui.h
 	$(CC) -o AltSnap.exe altsnap.c altsnap.res $(CFLAGS) $(EXELD) -mwindows -e_unfuckWinMain@0 -v
 
 altsnapr.o : altsnap.rc window.rc resource.h AltSnap.exe.manifest media/find.cur media/find.ico media/icon.ico media/tray-disabled.ico media/tray-enabled.ico

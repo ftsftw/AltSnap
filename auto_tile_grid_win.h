@@ -494,7 +494,8 @@ static void AutoTileRollback(const ATGSnapshot *before, const ATGSnapshot *obser
     }
 }
 
-static void AutoTileGridRun(POINT cursor, const ATGSelectedOwned *selected, ATGOwnedOperation *owned)
+static void AutoTileGridRun(HMONITOR monitor, const ATGSelectedOwned *selected,
+                             ATGOwnedOperation *owned, HWND foreground, unsigned axes)
 {
     static int busy;
     ATGSnapshot before, live, check;
@@ -504,10 +505,14 @@ static void AutoTileGridRun(POINT cursor, const ATGSelectedOwned *selected, ATGO
     HDWP batch;
     int ok;
     LONG generation = MovementGeneration();
-    HMONITOR monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONULL);
     if (busy || !monitor || !AutoTileIdle()) { AutoTileTrace("busy-or-no-monitor", 0); return; }
     busy = 1;
     if (!AutoTileCaptureOwned(monitor, &before, selected, owned)) { AutoTileTrace("capture", 0); goto done; }
+    if (axes) {
+        if (before.count != 4 || GetForegroundWindow() != foreground) goto done;
+        for (i = 0; i < before.count; ++i)
+            if (before.placement[i].showCmd != SW_SHOWNORMAL) goto done;
+    }
     if (!AutoTileCaptureOwned(monitor, &check, selected, owned) || !AutoTileUnchanged(&before, &check)
         || !AutoTileBaselines(&before, generation)) {
         AutoTileTrace("preflight-changed", before.count); goto done;
@@ -547,7 +552,12 @@ static void AutoTileGridRun(POINT cursor, const ATGSelectedOwned *selected, ATGO
     }
     /* Preserve original index order for rollback; recapture once more to test
        the normalized plan's frame and size limits for stability. */
-    if (!atg_plan(check.windows, check.count, AutoTileRect(check.mi.rcWork), &plan)) {
+    if (axes) {
+        for (i = 0; i < check.count && check.hwnd[i] != foreground; ++i) { }
+        ok = GetForegroundWindow() == foreground
+            && atg_expand(check.windows, check.count, i, AutoTileRect(check.mi.rcWork), axes, &plan);
+    } else ok = atg_plan(check.windows, check.count, AutoTileRect(check.mi.rcWork), &plan);
+    if (!ok) {
         AutoTileTrace("no-feasible-plan", check.count); goto rollback;
     }
     if (restore_mask) {
@@ -569,7 +579,8 @@ static void AutoTileGridRun(POINT cursor, const ATGSelectedOwned *selected, ATGO
         if (!restore_mask) goto done;
         goto success;
     }
-    if ((selected || owned) && !AutoTileBaselines(&live, generation)) {
+    if ((axes && GetForegroundWindow() != foreground)
+        || ((axes || selected || owned) && !AutoTileBaselines(&live, generation))) {
         AutoTileTrace(owned ? "profile-preflight-changed" : "selected-preflight-changed", 0); goto rollback;
     }
     batch = BeginDeferWindowPos(changed);
@@ -599,7 +610,8 @@ static void AutoTileGridRun(POINT cursor, const ATGSelectedOwned *selected, ATGO
     if (!AutoTileIdle() || generation != MovementGeneration()) {
         AutoTileTrace("cancelled", before.count); goto done;
     }
-    if (!AutoTileBaselines(&live, generation)) ok = 0;
+    if (!AutoTileBaselines(&live, generation)
+        || (axes && GetForegroundWindow() != foreground)) ok = 0;
     if (!ok) { AutoTileTrace("batch-verification-failed", before.count); goto rollback; }
 success:
     for (i = 0; i < before.count; ++i) ClearRestoreFlagOnResizeIfNeeded(before.hwnd[i]);
@@ -611,23 +623,37 @@ done:
     busy = 0;
 }
 
-static void AutoTileGrid(POINT cursor)
+/* Shared profile lifetime and transaction; expansion uses foreground's monitor,
+   ordinary tiling retains the established cursor-monitor selection. */
+static void AutoTileOnMonitor(HMONITOR monitor, HWND foreground, unsigned axes)
 {
     ATGOwnedOperation *owned;
-    HMONITOR monitor;
     if (!auto_tile_owned_enabled || !AutoTileIdle()) {
-        AutoTileGridRun(cursor, NULL, NULL);
+        AutoTileGridRun(monitor, NULL, NULL, foreground, axes);
         return;
     }
-    monitor=MonitorFromPoint(cursor, MONITOR_DEFAULTTONULL);
     if (!monitor) { AutoTileTrace("busy-or-no-monitor", 0); return; }
     owned=(ATGOwnedOperation *)calloc(1, sizeof *owned);
     if (!owned) { AutoTileTrace("profile-allocation-failed", 0); return; }
     owned->monitor=monitor;
     memcpy(owned->profiles, auto_tile_owned_profiles, sizeof owned->profiles);
-    AutoTileGridRun(cursor, NULL, owned);
+    AutoTileGridRun(monitor, NULL, owned, foreground, axes);
     AutoTileOwnedClose(owned);
     free(owned);
+}
+
+static void AutoTileGrid(POINT cursor)
+{
+    AutoTileOnMonitor(MonitorFromPoint(cursor, MONITOR_DEFAULTTONULL), 0, 0);
+}
+
+static void AutoTileExpand(unsigned axes)
+{
+    HWND foreground = GetForegroundWindow();
+    if (!foreground || !IsWindow(foreground) || !AutoTileIdle()) {
+        AutoTileTrace("expand-no-target-or-busy", 0); return;
+    }
+    AutoTileOnMonitor(MonitorFromWindow(foreground, MONITOR_DEFAULTTONULL), foreground, axes);
 }
 
 /* Separate, opt-in keyboard action: focus the intended main surface yourself.
@@ -647,7 +673,7 @@ static void AutoTileGridSelected(POINT cursor)
     if (!selected.pid || selected.pid == GetCurrentProcessId() || owner_pid != selected.pid
         || !AutoTileSelectedOwnedValid(&selected)) goto refused;
     AutoTileTrace("selected-owner-once", 1);
-    AutoTileGridRun(cursor, &selected, NULL);
+    AutoTileGridRun(MonitorFromPoint(cursor, MONITOR_DEFAULTTONULL), &selected, NULL, 0, 0);
     return;
 refused:
     AutoTileTrace("selected-owner-refused", 1);

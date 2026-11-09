@@ -6414,6 +6414,13 @@ LRESULT CALLBACK HooksWinPorc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             ptwindow = 1;
         }
 
+        if (action.ac == AC_AUTOTILEEXPANDBOTH
+            || action.ac == AC_AUTOTILEEXPANDHORIZONTAL || action.ac == AC_AUTOTILEEXPANDVERTICAL) {
+            AutoTileExpand(action.ac == AC_AUTOTILEEXPANDBOTH ? ATG_EXPAND_BOTH
+                : action.ac == AC_AUTOTILEEXPANDHORIZONTAL ? ATG_EXPAND_HORIZONTAL : ATG_EXPAND_VERTICAL);
+            return 0;
+        }
+
         if (action.ac == AC_AUTOTILEGRID || action.ac == AC_AUTOTILEGRIDSELECTED) {
             POINT cursor;
             if (GetCursorPos(&cursor)) {
@@ -6823,52 +6830,43 @@ static void CreateTransWin(const TCHAR *inisection)
     }
 }
 
+#include "kb_shortcuts.h"
+
 void registerAllHotkeys(const TCHAR* inipath)
 {
-    LOG("registerAllHotkeys START");
+    TCHAR *inisection = KBShortcutSection(inipath);
+    WORD registered[ARR_SZ(conf.KBShortcutsList)];
+    unsigned idx = 0;
     ChangeWindowMessageFilterExL(g_mainhwnd, WM_HOTKEY, /*MSGFLT_ALLOW*/1, NULL);
-    // MOD_ALT=1, MOD_CONTROL=2, MOD_SHIFT=4, MOD_WIN=8
-    // RegisterHotKey(g_mainhwnd, 0xC000 + AC_KILL,   MOD_ALT|MOD_CONTROL, VK_F4); // F4=73h
-    // Read All shortcuts in the [KBShortcuts] section.
-    TCHAR inisection[1800];
-    GetPrivateProfileSection(TEXT("KBShortcuts"), inisection, ARR_SZ(inisection), inipath);
-
+    if (!inisection) {
+        PostMessage(g_mainhwnd, WM_SHORTCUTERROR, 0, ERROR_INSUFFICIENT_BUFFER);
+        return;
+    }
     conf.UsePtWindow = GetSectionOptionInt(inisection, "UsePtWindow", 0);
-
-    #define ACVALUE(a, b, c) (#b),
-    static const char *action_names[] = { ACTION_MAP };
-    #undef ACVALUE
-
-    int idx = 0;
-    for (const TCHAR *p = inisection; *p && idx < (int)ARR_SZ(conf.KBShortcutsList); p += lstrlen(p)+1) {
-        if(*p == ';') continue;
-
+    for (const TCHAR *p = inisection; *p; p += lstrlen(p)+1) {
         action_t action = MapActionW(p);
-        if (action.ac == AC_NONE) continue;
-
-        const TCHAR *pp = lstrchr(p, TEXT('='));
-        if(!pp) continue;
-
-        WORD HK = strtoi(p = ++pp); // Read HOTKEY
-        if(LOBYTE(HK) && HIBYTE(HK)) {
-            // Lobyte is the virtual key code and hibyte is the mod_key
-            if (RegisterHotKey(g_mainhwnd, 0xC001 + idx, HIBYTE(HK), LOBYTE(HK))) {
-                conf.KBShortcutsList[idx] = action; // Add action to the list
-                LOG("OK registering hotkey %s_%d_%d=%x, [idx=%d]", action_names[action.ac], (int)action.fl, (int)action.wp, (unsigned)HK, (int)idx);
-                idx++;
-            } else {
-                LOG("Error registering hotkey %s=%x", action_names[action.ac], (unsigned)HK);
-                #ifdef LOG_STUFF
-                TCHAR title[76], acN[32];
-                lstrcpy_s(title, ARR_SZ(title), TEXT(APP_NAMEA)TEXT(": unable to register hotkey for action "));
-                str2tchar_s(acN, ARR_SZ(acN)-1, action_names[action.ac]);
-                lstrcat_s(title, ARR_SZ(title), acN);
-                ErrorBox(title);
-                #endif // LOG_STUFF
-            }
+        const TCHAR *eq = lstrchr(p, TEXT('='));
+        unsigned j;
+        DWORD error = 0;
+        WORD hk;
+        if (*p == ';' || action.ac == AC_NONE || !eq) continue;
+        hk = (WORD)strtoi(eq+1);
+        if (!hk) continue;
+        for (j = 0; j < idx && registered[j] != hk; ++j) { }
+        if (!KBShortcutValid(hk)) error = ERROR_INVALID_DATA;
+        else if (j < idx) error = ERROR_HOTKEY_ALREADY_REGISTERED;
+        else if (idx == ARR_SZ(conf.KBShortcutsList)) error = ERROR_NO_MORE_ITEMS;
+        else if (!RegisterHotKey(g_mainhwnd, 0xC001 + idx, HIBYTE(hk), LOBYTE(hk))) {
+            error = GetLastError();
+            if (!error) error = ERROR_HOTKEY_ALREADY_REGISTERED;
+        }
+        if (error) PostMessage(g_mainhwnd, WM_SHORTCUTERROR, MAKEWPARAM(action.ac, hk), error);
+        else {
+            conf.KBShortcutsList[idx] = action;
+            registered[idx++] = hk;
         }
     }
-    LOG("registerAllHotkeys END");
+    free(inisection);
 }
 static void readalluchars(UCHAR *dest, const TCHAR * const inisection, const struct OptionListItem *optlist, size_t listlen)
 {

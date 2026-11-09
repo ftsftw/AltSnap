@@ -15,10 +15,10 @@ CFLAGS=-Os -fno-stack-check -fno-stack-protector -fno-ident -fomit-frame-pointer
 
 default: AltSnap.exe hooks.dll
 
-hooks.dll : hooks.c hooks.h hooksr.o unfuck.h window_process_name.h nanolibc.h zones.c snap.c linked_grid_win.h linked_grid.c linked_grid.h linked_grid_queue.h linked_grid_recovery.h auto_tile_grid_win.h auto_tile_grid.c auto_tile_grid.h auto_tile_owned_guard.h auto_tile_owned_store.h auto_tile_owned_image.h auto_tile_owned_match.h auto_tile_owned_runtime.h auto_tile_owned_ui.h
+hooks.dll : hooks.c hooks.h hooksr.o unfuck.h window_process_name.h nanolibc.h zones.c snap.c linked_grid_win.h linked_grid.c linked_grid.h linked_grid_queue.h linked_grid_recovery.h auto_tile_grid_win.h auto_tile_grid.c auto_tile_grid.h auto_tile_owned_guard.h auto_tile_owned_store.h auto_tile_owned_image.h auto_tile_owned_match.h auto_tile_owned_runtime.h auto_tile_owned_ui.h kb_shortcuts.h
 	$(CC) -o hooks.dll hooks.c hooksr.o $(CFLAGS) -mdll -eDllMain -Wl,--kill-at -lshell32
 
-AltSnap.exe : altsnapr.o altsnap.c hooks.h tray.c config.c languages.h languages.c unfuck.h window_process_name.h nanolibc.h auto_tile_owned_guard.h auto_tile_owned_store.h auto_tile_owned_image.h auto_tile_owned_match.h auto_tile_owned_runtime.h auto_tile_owned_ui.h
+AltSnap.exe : altsnapr.o altsnap.c hooks.h tray.c config.c languages.h languages.c unfuck.h window_process_name.h nanolibc.h auto_tile_owned_guard.h auto_tile_owned_store.h auto_tile_owned_image.h auto_tile_owned_match.h auto_tile_owned_runtime.h auto_tile_owned_ui.h kb_shortcuts.h kb_shortcuts_ui.h
 	$(CC) -o AltSnap.exe altsnap.c altsnapr.o $(CFLAGS) -Wl,--tsaware,--disable-reloc-section -mwindows -lcomctl32 -ladvapi32 -lshell32 -eunfuckWinMain
 
 altsnapr.o : altsnap.rc window.rc resource.h AltSnap.exe.manifest media/find.cur media/find.ico media/icon.ico media/tray-disabled.ico media/tray-enabled.ico

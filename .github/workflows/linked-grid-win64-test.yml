@@ -42,6 +42,10 @@ jobs:
           cp AltSnap.exe work/native-profile-tests/
           x86_64-w64-mingw32-gcc-win32 -O2 -std=c99 -Wall -Wextra -Werror -pedantic tests/auto_tile_owned_native_test.c -luser32 -o work/native-profile-tests/profile-ansi.exe
           x86_64-w64-mingw32-gcc-win32 -O2 -std=c99 -Wall -Wextra -Werror -pedantic -D_UNICODE -DUNICODE tests/auto_tile_owned_native_test.c -luser32 -o work/native-profile-tests/profile-unicode.exe
+      - name: Build native Windows shortcut contract tests
+        run: |
+          x86_64-w64-mingw32-gcc-win32 -O2 -std=c99 -Wall -Wextra -Werror -pedantic tests/kb_shortcuts_native_test.c -luser32 -o work/native-profile-tests/shortcuts-ansi.exe
+          x86_64-w64-mingw32-gcc-win32 -O2 -std=c99 -Wall -Wextra -Werror -pedantic -D_UNICODE -DUNICODE tests/kb_shortcuts_native_test.c -luser32 -o work/native-profile-tests/shortcuts-unicode.exe
       - uses: actions/upload-artifact@v4
         with:
           name: owned-profile-native-tests
@@ -73,3 +77,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "ANSI profile contract failed" }
           & ./native-tests/profile-unicode.exe
           if ($LASTEXITCODE -ne 0) { throw "Unicode profile contract failed" }
+      - name: Test actual Windows shortcut and combobox contracts
+        shell: pwsh
+        run: |
+          & ./native-tests/shortcuts-ansi.exe
+          if ($LASTEXITCODE -ne 0) { throw "ANSI shortcut contract failed" }
+          & ./native-tests/shortcuts-unicode.exe
+          if ($LASTEXITCODE -ne 0) { throw "Unicode shortcut contract failed" }
