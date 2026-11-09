@@ -8,6 +8,10 @@
 
 #include <commctrl.h>
 #include "resource.h"
+#include "auto_tile_owned_store.h"
+#include "auto_tile_owned_image.h"
+#include "auto_tile_owned_match.h"
+#include "auto_tile_owned_ui.h"
 
 #ifndef TTM_SETMAXTIPWIDTH
 #define TTM_SETMAXTIPWIDTH (WM_USER+24)
@@ -1677,6 +1681,7 @@ static INT_PTR CALLBACK BlacklistPageDialogProc(HWND hwnd, UINT msg, WPARAM wPar
 
     if (msg == WM_INITDIALOG) {
         ReadDialogOptions(hwnd, optlst, ARR_SZ(optlst));
+        atg_identified_valid=0;
         BOOL haveProcessBL = HaveProc("PSAPI.DLL", "GetModuleFileNameExW");
         EnableDlgItem(hwnd, IDC_PROCESSBLACKLIST, haveProcessBL);
         EnableDlgItem(hwnd, IDC_PAUSEBL, haveProcessBL);
@@ -1689,6 +1694,8 @@ static INT_PTR CALLBACK BlacklistPageDialogProc(HWND hwnd, UINT msg, WPARAM wPar
         && id != IDC_NCHITTEST && id != IDC_GWLSTYLE && id != IDC_RECT) {
             PropSheet_Changed(g_cfgwnd, hwnd); // Enable the Apply Button
             have_to_apply = 1;
+        } else if (id == IDC_OWNED_PROFILES && event == BN_CLICKED) {
+            DialogBox(g_hinst, MAKEINTRESOURCE(IDD_OWNED_PROFILES), hwnd, AutoTileOwnedDialog);
         } else if (event == STN_CLICKED && id == IDC_FINDWINDOW) {
             // Get size of workspace
             int left=0, top=0, width, height;
@@ -1767,6 +1774,9 @@ static LRESULT CALLBACK FindWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 //            GetCursorPos(&pt);
             HWND nwindow = WindowFromPoint(pt);
             HWND window = GetAncestor(nwindow, GA_ROOT);
+            atg_identified_valid=ATGOwnedPin(window, &atg_identified_pin)
+                && ATGOwnedClass(window, atg_identified_class)
+                && ATGOwnedClass(atg_identified_pin.owner, atg_identified_owner_class);
 
             TCHAR title[256], classname[256];
             GetWindowText(window, title, ARR_SZ(title));

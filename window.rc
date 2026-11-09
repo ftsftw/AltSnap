@@ -45,7 +45,8 @@ BEGIN
 
     GROUPBOX    "", IDC_FINDWINDOW_BOX,          3,140,212,78
     ICON        IDI_FIND,         IDC_FINDWINDOW,  12,160,16,16, SS_NOTIFY|SS_REALSIZEIMAGE
-    EDITTEXT    IDC_NEWRULE,      30,150,180,12,ES_AUTOHSCROLL
+    EDITTEXT    IDC_NEWRULE,      30,150,102,12,ES_AUTOHSCROLL
+    PUSHBUTTON  "Owned profiles...", IDC_OWNED_PROFILES, 134,149,76,14
     EDITTEXT    IDC_NEWPROGNAME,  30,165,95,12,ES_AUTOHSCROLL
     RTEXT       "STYLE:", 0, 125,167,32,8
     EDITTEXT    IDC_GWLSTYLE,  160,165,50,12,ES_AUTOHSCROLL
@@ -263,3 +264,19 @@ IDI_FIND                CURSOR  DISCARDABLE     "media/find.cur"
 // Icon with lowest ID value placed first to ensure application icon
 // remains consistent on all systems.
 IDI_FIND                ICON    DISCARDABLE     "media/find.ico"
+
+// Explicit build-bound consent; no new shortcut UI.
+IDD_OWNED_PROFILES DIALOG 0, 0, 300, 220
+STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Owned-window profiles (experimental)"
+FONT 8, "MS Shell Dlg 2"
+BEGIN
+    LTEXT "Use Identify window on the intended main window with dialogs closed. Registration saves a disabled profile. Enable it only if you trust this build's main-window class and topology.", -1, 8,6,284,30
+    LISTBOX IDC_OWNED_LIST, 8,39,284,65, LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP | WS_BORDER
+    EDITTEXT IDC_OWNED_DETAIL, 8,109,284,66, ES_MULTILINE | ES_READONLY | WS_VSCROLL
+    PUSHBUTTON "Register identified", IDC_OWNED_REGISTER, 8,181,88,16
+    PUSHBUTTON "Enable / Disable", IDC_OWNED_TOGGLE, 100,181,88,16
+    PUSHBUTTON "Delete", IDC_OWNED_DELETE, 192,181,48,16
+    DEFPUSHBUTTON "Close", IDCANCEL, 244,181,48,16
+    LTEXT "Profiles are local to this AltSnap INI. Changes are saved immediately.", -1, 8,203,284,10
+END

@@ -20,6 +20,13 @@
 #define IDD_ADVANCEDPAGE                 205
 #define IDD_ABOUTPAGE                    206
 #define IDD_ACTIONPARAM                  207
+#define IDD_OWNED_PROFILES               208
+#define IDC_OWNED_PROFILES               1900
+#define IDC_OWNED_LIST                   1901
+#define IDC_OWNED_DETAIL                 1902
+#define IDC_OWNED_REGISTER               1903
+#define IDC_OWNED_TOGGLE                 1904
+#define IDC_OWNED_DELETE                 1905
 
 #define IDI_FIND                         301
 #define IDI_BIGICON                      302

@@ -42,7 +42,7 @@ $(WIN_STUBS): linked_grid_win_test.c linked_grid_win_stub.h ../linked_grid_win.h
 	mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) linked_grid_win_test.c $(LDFLAGS) -o $@
 
-$(AUTO_WIN): auto_tile_grid_win_test.c ../auto_tile_grid_win.h ../window_process_name.h ../auto_tile_grid.c ../auto_tile_grid.h ../linked_grid.h ../linked_grid_queue.h
+$(AUTO_WIN): auto_tile_grid_win_test.c ../auto_tile_grid_win.h ../auto_tile_owned_guard.h ../auto_tile_owned_store.h ../auto_tile_owned_runtime.h ../auto_tile_owned_match.h ../window_process_name.h ../auto_tile_grid.c ../auto_tile_grid.h ../linked_grid.h ../linked_grid_queue.h
 	mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) auto_tile_grid_win_test.c $(LDFLAGS) -o $@
 

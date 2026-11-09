@@ -916,6 +916,8 @@ static int ShouldResizeTouching(void)
         );
 }
 #include "linked_grid_win.h"
+#include "auto_tile_owned_store.h"
+#include "auto_tile_owned_image.h"
 #include "auto_tile_grid_win.h"
 
 static void EnumOnce(RECT **bd);
@@ -6945,6 +6947,7 @@ __declspec(dllexport) WNDPROC WINAPI Load(HWND mainhwnd, const TCHAR *inipath)
     GetPrivateProfileSection(TEXT("General"), inisection, inisectionlen, inipath);
     readalluchars(&conf.AutoFocus, inisection, General_uchars, ARR_SZ(General_uchars));
     auto_tile_trace = GetSectionOptionInt(inisection, "AutoTileTrace", 0) == 1;
+    AutoTileOwnedLoad(inipath);
     if (conf.LinkedGridResize) {
         linked_trace = GetSectionOptionInt(inisection, "LinkedGridTrace", 0) == 1;
         linked_trace_offers = 0;

@@ -31,7 +31,7 @@ if [[ "$package" == AltSnap-auto-tile-win64-test ]]; then
     cp AUTO_TILE_GRID.md "$stage/"
 fi
 python3 - "$stage/AltSnap.ini" <<'PY'
-import pathlib, sys
+import pathlib, re, sys
 config = pathlib.Path(sys.argv[1]).read_bytes().decode('utf-16')
 assert 'LinkedGridResize=0' in config
 assert 'StickyResize=0' in config
@@ -40,6 +40,8 @@ assert not any(line.strip().startswith(('AutoTileGrid=', 'AutoTileGridSelected='
 # Trace is opt-in even if the default template does not mention it.
 assert not any(line.strip() == 'LinkedGridTrace=1' for line in config.splitlines())
 assert not any(line.strip() == 'AutoTileTrace=1' for line in config.splitlines())
+assert not any(re.fullmatch(r'\[AutoTileOwned[0-9]+\]', line.strip(), re.I)
+               for line in config.splitlines()), 'Never ship local consent records'
 PY
 mkdir -p "$output"
 rm -f "$output/$package.zip"

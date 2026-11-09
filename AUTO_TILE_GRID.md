@@ -75,9 +75,10 @@ Disable `AutoTileTrace` afterwards. Do not elevate AltSnap to force participatio
 No trace files, window identifiers, titles, executable names, paths, PID/TID,
 geometry or content are emitted. Only fixed codes, categorical owner observations,
 counts/participant indices and existing numeric Win32 process-query errors are
-written. In ordinary AutoTileGrid, no extra diagnostic window/process queries
-or GetLastError/SetLastError calls run with `AutoTileTrace=0`. The explicit
-selection action always performs its safety reads, independently of tracing.
+written. Without enabled profiles, ordinary AutoTileGrid performs no extra
+diagnostic window/process queries or GetLastError/SetLastError calls with trace
+off. Selected and registered-profile safety reads always run independently of
+tracing. No diagnostic output is emitted with AutoTileTrace=0.
 
 Each capture is bracketed by `scan-begin count=0` and `scan-candidates count=N`.
 Monitor/invisible/cloaked/zero-size/minimized exclusions are aggregated into at
@@ -109,9 +110,10 @@ constituent predicates to classify the rejection. Those diagnostic observations
 can race with window changes and never change eligibility; a mismatch should be
 retested with the window stable. Ordinary/style/owner checks emit the actual
 first short-circuited reason. One record need not reveal every possible blocker.
-Ordinary AutoTileGrid keeps every WS_THICKFRAME, child, owner, fullscreen and
-other safety gate. The separate experimental selection action below grants a
-one-invocation owner exception only to its explicitly chosen window.
+Ordinary AutoTileGrid keeps every WS_THICKFRAME, child, fullscreen and other
+safety gate. Owned participation requires either an enabled registered profile
+or the separate one-invocation Selected authorization; neither grants permission
+to arbitrary owned windows.
 
 Process detail uses `reason=... error=N` (not `count`):
 
@@ -203,7 +205,8 @@ real VS Code process permits the limited right or passes later DPI/size gates.
 
 ## MobaXterm: owner analysis and admission boundaries
 
-In ordinary `AutoTileGrid`, `skip-owner` retains its unconditional refusal.
+Without an enabled registered profile, ordinary `AutoTileGrid` retains its
+unconditional `skip-owner` refusal.
 Only when `AutoTileTrace=1`,
 an owner rejection is preceded by at most four contiguous diagnostic lines,
 all matching the existing **AltSnap.ATG** DebugView filter. There are no handles,
@@ -248,9 +251,9 @@ non-null ancestor different from both candidate and immediate owner (a deeper
 chain). Last-active popup is activation history, not a complete dialog list or a
 modality test. These APIs send no diagnostic messages, do not activate/resize or
 otherwise modify windows, and require no background process, worker or elevation.
-In ordinary AutoTileGrid with tracing off, the original single GW_OWNER
-eligibility read remains, and none of these extra diagnostic queries, formatting,
-error-state operations or output runs. The explicit selection action performs
+In ordinary AutoTileGrid without enabled profiles and with tracing off, the
+original single GW_OWNER eligibility read remains, and none of these extra
+diagnostic queries, formatting, error-state operations or output runs. The explicit selection action performs
 its safety checks regardless of tracing; tracing only controls its output.
 Earlier exclusions such as tool/no-activate windows still short-circuit before
 GW_OWNER; they do not produce an owner block.
@@ -280,15 +283,17 @@ root/rootowner/lastpopup all self. With a dialog open, both candidate and owner
 become disabled; a `skip-child` record is also present. That child record cannot
 identify which window produced it without a window ID, and no such ID is logged.
 These are useful observations of this version, not a proof that the joint profile
-uniquely identifies a main window. A modeless/custom dialog can share the profile.
+uniquely identifies a main window. Registered profiles below express explicit
+user trust in an exact build instead of claiming such a proof. A modeless/custom dialog can share the profile.
 In particular, GA_ROOTOWNER=self despite a non-null GW_OWNER is an observed API
 result, not grounds to discard the owner link.
 
-No automatic owned-main classifier or executable allowlist is implemented.
+No implicit owned-main classifier or built-in executable allowlist is implemented.
 hooks.c's IsAltTabAble remains a presentation selector, too permissive for
 automatic movement. Instead the separate action below requires an explicit
 per-invocation user choice and uses the observed joint profile only as a narrow
-safety guard. Process lookup (including the VS Code fallback), all blacklists,
+safety guard. The registered-profile path additionally permits repeated ordinary
+invocations after explicit one-time setup, as described below. Process lookup (including the VS Code fallback), all blacklists,
 Linked Grid Resize, layout planning, min/max checks and recovery algorithms are
 unchanged.
 
@@ -438,142 +443,200 @@ This is a bounded GUI report for explicit selection. It does not establish every
 modeless/custom dialog, release, theme or portable/installed mode. No new GUI run
 was performed in the Linux environment.
 
-### Automatic admission assessment: not enabled
+### Registered owned-window compatibility profiles (experimental)
 
-The ordinary command still excludes all owned windows, including MobaXterm, and
-does not consult foreground selection. The requested focus-independent automatic
-MobaXterm exception is **not implemented**: the evidence does not establish a
-sufficiently reliable main/dialog discriminator. No runtime guards were relaxed,
-no MobaXterm EXE allowlist was added, and no general owned-window classifier was
-introduced. AutoTileGridSelected remains the experimental fallback unchanged.
+This implementation records **explicit user consent to an exact application
+build**. It does not infer a main-window role from APPWINDOW, a class, EXE name,
+owner or enabled bit. Nothing is automatically enrolled, and no MobaXterm name
+is built into the implementation. Portable executables may use arbitrary names.
+AutoTileGridSelected keeps its existing foreground-based behavior as a fallback.
+The supplied Windows 10 report confirms Selected only; the new registered-profile
+path still requires the real GUI test below.
 
-Public-source research does supply a useful **candidate identifier**:
-[Komorebi's application-specific configuration](https://github.com/LGUG2Z/komorebi-application-specific-configuration/blob/master/applications.json)
-uses the conjunction of exact executable name `MobaXterm.exe` and exact window
-class `TMobaXtermForm` for its MobaXterm manage rule. The same configuration
-separately ignores Delphi `TApplication` helpers. This is primary evidence of
-another window manager's compatibility choice, not a Mobatek contract that no
-custom/modeless dialog can ever use the main class. It does not establish that
-the owner of the user's tested window is TApplication; that class was not in the
-supplied trace. Do not infer it from TOOLWINDOW or framework naming alone.
-Portable executable names also vary; university deployment instructions describe
-[versioned MobaXterm_Personal executables](https://ri.itservices.manchester.ac.uk/course/rcsf/RCSF-HPC_practical_1_sep2025.pdf).
-An executable-name wildcard to accommodate them would enlarge the admission rule,
-not validate UI roles.
+#### One-time setup through the Windows 10 interface
 
-The reviewed [Mobatek documentation](https://mobaxterm.mobatek.net/documentation.html)
-describes detached tabs, settings and session windows, but supplies no class/owner
-role contract or complete dialog-class inventory. The
-[official changelog](https://mobaxterm.mobatek.net/download-home-edition.html)
-records changes to taskbar/main-class icons, popup behavior and dialog positioning.
-Those changes justify checking actual builds; they do not prove that the current
-main class is shared with a dialog. No such real MobaXterm class collision has
-been observed in this task.
+1. Use the portable ZIP for this commit, unpacking both ZIP layers. Exit the old
+   AltSnap copy and start this copy without elevation. Preserve your INI backup.
+   Keep `[KBShortcuts] AutoTileGrid=839` for the ordinary Ctrl+Alt+G command.
+2. Open AltSnap settings, **Blacklist**, then use the existing **Identify window**
+   tool on the intended main window, with its dialogs closed. Its displayed title,
+   class and executable let you check the target locally. The tool selects
+   GA_ROOT, as before; point at the intended main surface, not an embedded dialog.
+3. Click **Owned profiles...** beside Identify window. This small experimental
+   manager has eight local slots. Choose an empty slot and click
+   **Register identified**. Confirm the explicit-trust explanation. Registration
+   always saves **off**; replacing a slot also revokes its previous enabled state.
+   The temporary Identify selection is discarded after registration or closing
+   the manager; use Identify again to register another window.
+4. Check the saved local path, SHA-256 and candidate/owner classes in the manager.
+   Select **Enable / Disable** and confirm trust for this build. The image hash
+   is checked again before enabling. Changes save immediately and reload AltSnap
+   settings; Apply is not required for profiles. The new manager uses English
+   labels; the existing settings/shortcut interface and language files are unchanged.
+5. Close settings, keep MobaXterm visible with dialogs closed, and focus any of
+   Chrome/VS Code/Terminal. Put the cursor on the intended monitor and press the
+   **ordinary Ctrl+Alt+G**. No Selected shortcut or repeated permission is needed.
+   The consent survives AltSnap/application restarts for the same path/build.
+6. To stop trusting the build, reopen the manager and toggle it **off**, or
+   **Delete** the record. To update the EXE or move/rename it, identify the new
+   main surface and register again; the replacement starts off. Never enable an
+   old fingerprint merely by editing its hash. Keep your profile INI private.
 
-| Candidate signal | What it adds / why it cannot complete automatic admission here |
+Only the local AltSnap INI is changed. There is no registry permission, window
+property, saved HWND/PID/TID, process allowlist by basename, background worker,
+new hotkey or automatic foreground activation. The confirmation is application
+consent, not a request for Windows administrator rights. Do not elevate to force
+an otherwise refused window.
+
+#### Persisted contract and operation witnesses
+
+Records use `[AutoTileOwned1]` through `[AutoTileOwned8]` in the active INI, with
+`Enabled`, `Schema`, `Path`, `SHA256`, `Class`, `OwnerClass`, `Topology`, `Style`,
+`ExStyle`, `OwnerStyle` and `OwnerExStyle`. These are local settings, never trace
+fields. Schema 1 names the supported `caption-app-same-tool-self-v1` topology.
+The serializer writes Enabled=0 and an invalid schema before replacing fields,
+then commits the schema and checks the round trip. Interrupted/failed registration
+cannot enable a partial record. Unknown/malformed enabled records cancel ordinary
+tilings until disabled/deleted; malformed disabled records grant nothing.
+The shipped portable INI contains no registrations and enables none by default.
+
+The saved path is the complete process image path returned by the existing
+validated process-query helper. SHA-256 is computed by Windows CryptoAPI over the
+actual local file bytes. Local fixed/removable/RAM drives are accepted; UNC/device
+paths, reparse files, noncanonical aliases, missing/empty/unreadable images and
+images above **128 MiB** refuse. Classes must fit the supported **62 TCHAR** limit
+without truncation. The existing MAX_PATH and build TCHAR/code-page limits still apply; unsupported
+paths/classes refuse rather than being accepted after truncation. A build update
+changes the hash even if its filename/version string is unchanged.
+
+At each ordinary invocation with at least one enabled profile, an operation-local
+copy of the profile records is made. Candidate/owner HWND, PID/TID and file handles
+exist only for that call. Each matching image is hashed once and held open with
+read sharing only, without write/delete sharing, until success/refusal/recovery
+returns. Volume/file index, size and write time are checked through that handle
+while the operation runs. There is no digest cache or saved process identity
+between invocations. All paths close the handles, including partial normalization
+and failure recovery. Local disk hashing adds work to this opt-in path; native
+file I/O has no application-message timeout and slow storage can delay the call.
+
+The shared owned-topology guard is used by both Selected and registered profiles.
+Foreground equality is required only by Selected. Profile participation also
+requires exact saved candidate/owner classes, matching image path/hash and masked
+styles. The style mask records CHILD/POPUP/CAPTION/THICKFRAME and the extended
+APPWINDOW/TOOLWINDOW/NOACTIVATE/DLGMODALFRAME bits. Transient maximize/visible bits
+are not persisted, allowing normal, button-maximized and mouse-resized states.
+The joint guard still requires:
+
+- A visible, enabled, captioned, resizable, non-child/non-POPUP APPWINDOW candidate;
+  no TOOLWINDOW, NOACTIVATE, DLGMODALFRAME or standard dialog class.
+- A distinct, stable, same-process, visible/enabled TOOLWINDOW owner, without
+  APPWINDOW/NOACTIVATE/DLGMODALFRAME and with the enrolled owner class/style mask.
+- GA_ROOT, GA_ROOTOWNER and last-active-popup equal to the candidate, as in the
+  supplied MobaXterm trace. Classes/styles and both identities are rechecked
+  around observation. Unknown/truncated required reads are refusals.
+- No additional visible top-level surface of the candidate's process except
+  that exact owner. This includes tool, disabled, modal/modeless/custom and
+  otherwise ineligible windows, even on another monitor.
+
+On the selected monitor, each enabled profile must have **one unique main-class
+match** when that image is visible. A changed main class, only a visible helper/
+dialog, duplicate enabled registrations or multiple instances matching the same
+profile on that monitor cancel the whole layout. Different registered applications
+can participate together. Independent instances on other monitors are not selected;
+a same-process visible extra surface is still a conservative refusal. An owned
+window with the enrolled main class but a different image path is suspicious and
+also cancels instead of inheriting consent. Other unrelated owned windows retain
+their ordinary exclusion. With profiles enabled, an unreadable visible process
+identity/class during the monitor scan conservatively cancels; this can refuse an
+otherwise unrelated protected/transient app and never increases access rights.
+
+Profile discovery and witnesses are rechecked before/after capture, through
+baseline checks, after message-sending min/max queries and normalization, before
+the final batch, and in observation/recovery eligibility. A matched profiled window
+that fails an ordinary gate (including blacklist, minimized/fullscreen/DPI/min-max
+or DWM checks), or disappears from capture, cancels the **whole** operation. It is
+not silently omitted so that peers can cover its dialog. Ordinary peers retain
+their prior exclusions, but five eligible participants still refuse before any
+normalization. Drag/busy refusal, 1–4 planning, double capture, the VS Code process
+fallback and Linked Grid Resize algorithms stay unchanged.
+
+A detected identity/owner/class/build loss latches refusal for profiled targets
+in that operation. Existing guarded rollback may still restore safe unrelated
+peers, but must not force a now-invalid trusted HWND back. As with Selected, this
+can leave partial recovery after application callbacks or an external change.
+The existing maximize recovery can activate/raise a window; no stronger atomicity
+or focus guarantee is claimed.
+
+With **no enabled profiles**, the ordinary path does not scan profile candidates,
+open/hash images, read profile keys per shortcut or query foreground. It keeps the
+previous owner exclusion. Disabled profiles and failed registrations are not
+permissions. Selected continues to work independently of enabled or invalid
+profile records, with exactly its prior foreground policy.
+
+#### Diagnostics and residual risk
+
+All new trace output stays under **AltSnap.ATG** and uses fixed codes/counts:
+
+| Event | Meaning |
 | --- | --- |
-| Exact main class plus exact image name | Narrower than styles and useful for a compatibility profile; no supplied same-version negative inventory of custom/modeless dialogs or promise of class-role stability |
-| Image path, product/version, signature or binary hash | Can bind approval to an application/build; every dialog of that process still has the same image identity |
-| Process PID/TID / process role | Detects many replacements, not semantic main/dialog role; the ordinary process-name helper intentionally supplies identity only |
-| APPWINDOW or an actual taskbar button | Presentation choice, not proof of a main surface; VCL can associate the taskbar button with a form or helper window |
-| Same-process visible/enabled TOOLWINDOW owner and root/popup=self | Matches the tested main surface and rejects the tested disabled modal state; modeless/custom surfaces need not disable either window |
-| No other visible same-process top-level surface | Rejects visible dialogs/duplicate surfaces, including ones ordinary eligibility would omit; cannot distinguish a sole visible dialog while the real main surface is hidden |
-| Last-active popup / disabled owner | Activation history and some modality evidence, not a complete inventory of active dialogs; child-embedded or other-process UI remains outside it |
-| Stable class/owner/styles/identity across captures | Necessary race detection; a stable wrong-role window remains wrong-role, and same-process/thread HWND reuse or changes after a read can escape detection |
-| Accessibility dialog/modal flags | Provider-dependent role information is not guaranteed for every custom/modeless UI; absence/unsupported data cannot serve as affirmative main-window evidence |
+| `profile-refused` | Invalid enabled record, discovery ambiguity, missing/changed build/classes/topology, suspect peer/dialog or failed required read |
+| `profile-not-captured` | A pinned profiled target failed ordinary capture; no partial-set fallback |
+| `profile-witness-lost` | The profiled HWND no longer satisfies its operation-local consent witness |
+| `profile-allocation-failed` | The operation-local state could not be allocated |
+| `profile-preflight-changed` | Last shared baseline before batch creation changed |
 
-Microsoft documents [window classes](https://learn.microsoft.com/en-us/windows/win32/winmsg/window-classes)
-as window-creation templates, not application-role certificates. Embarcadero's
-[CreateParams documentation](https://docwiki.embarcadero.com/Libraries/Athens/en/Vcl.Controls.TWinControl.CreateParams)
-allows overriding creation parameters, and its
-[MainFormOnTaskBar documentation](https://docwiki.embarcadero.com/Libraries/Athens/en/Vcl.Forms.TApplication.MainFormOnTaskBar)
-explains the form/helper taskbar distinction. These contracts support the limits
-above, not an assertion about untested MobaXterm internals. Microsoft's
-[UI Automation window support contract](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-supportwindowcontroltype)
-is scoped to frameworks integrating the provider patterns. Its
-[IsWindow contract](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-iswindow)
-also explicitly cautions about destruction and handle recycling after a check.
+Existing scan, process, size, normalization, final and rollback records remain
+relevant. A final success/unchanged count includes the registered participant.
+No new path, hash, class, handle, PID/TID, geometry
+or raw style is written to DebugView. Trace off removes diagnostic output while
+retaining required profile safety checks.
 
-The new stub counterexample constructs two **synthetic** UI-role interpretations
-with identical image name, class, owner topology, process/thread identities,
-styles, visible peer set, geometry and placement. Both pass the production
-explicit-selection guard and produce unchanged captures. One interpretation is a
-main surface with a hidden helper; the other is a custom/modeless surface with a
-hidden real main window. There is no trusted semantic-role input for the guard to
-read. This proves that reusing the generic guard as an automatic classifier is
-insufficient; it does **not** prove that an actual MobaXterm dialog uses this class.
-Ordinary AutoTileGrid rejects the owned surface in both interpretations. Calling
-the guard repeatedly, or adding the same EXE/class as a permissive allowlist,
-would not resolve that ambiguity.
+**The synthetic role counterexample remains valid.** An indistinguishable custom
+surface of the explicitly approved build, with the approved classes/topology and
+no other visible same-process surface, can match while the real main is hidden.
+Registration is deliberate trust in that build's UI, not proof that every match
+is a main window. Stub tests retain both the no-consent refusal and this opt-in
+residual case. Checks are sequential: same-process/thread HWND reuse, changes
+away and back or a dialog appearing after the last observation can escape them.
+The fingerprint identifies disk bytes, not running-memory attestation; restarting
+after an application update and re-registering the new build remains necessary.
+Other-process or child-embedded UI is not a complete dialog model. Keep profiles
+only for builds and UI modes you have actually checked. No universal compatibility
+or new real MobaXterm GUI success is claimed by this implementation.
 
-### Most convenient alternative: one-time build-bound profile (proposal only)
+#### Exact Windows 10 acceptance test
 
-A future opt-in profile could meet the workflow goal after one setup, without a
-foreground requirement on subsequent ordinary AutoTileGrid invocations:
+1. **No consent control:** before registration, ordinary AutoTileGrid must still
+   exclude MobaXterm and tile three ordinary apps in 1+2, with trace on and off.
+2. Register and enable as above. Test MobaXterm alone (count=1), with three ordinary
+   apps (count=4, 2×2), normal/button-maximized/mouse-resized and repeated calls.
+   Focus Chrome, VS Code and Terminal in turn; the same ordinary shortcut must
+   include the trusted window without activating it deliberately. Repeat after
+   restarting both AltSnap and MobaXterm to check persisted consent and fresh IDs.
+3. Open the tested modal dialog; invoke while another app has focus. Expect a
+   whole-operation refusal with no movement. Repeat with available modeless/custom
+   dialogs, detached tabs, settings/session/password prompts and editor/tools;
+   do not mark unavailable cases as tested. Include main-visible and main-hidden
+   modes where possible, noting the indistinguishable-custom-dialog limit.
+4. Add a fourth ordinary app (five eligible including MobaXterm): expect too-many
+   without normalization/movement. Check Processes/Windows/Bottommost blacklists
+   against the registered target: none of the peers should move. Check restrictive
+   min/max/DPI refusals and the previously successful Linked Grid Resize limits.
+5. Disable/delete the profile in the manager: ordinary AutoTileGrid returns to
+   the previous exclusion immediately. Register again off, and confirm it still
+   grants nothing until Enable. Test an updated/replaced EXE: the old hash must
+   refuse the whole layout; re-registering the new build must start disabled.
+6. Test duplicate records/multiple instances, unknown owners/classes, dialogs
+   appearing during sizing and partial application corrections/recovery where
+   practical. Keep full filtered trace and manual case/version notes separately.
+   A guarded refusal to restore a changed identity is expected, not a reason to
+   force rollback. Repeat successful controls with AutoTileTrace=0.
 
-1. Once per approved application build, explicitly choose its real main surface
-   with dialogs closed. Record consent tied to its exact executable/build
-   fingerprint and candidate/owner class pair plus the joint topology contract.
-   Keep these values local to configuration; never put names, paths, raw styles
-   or fingerprints in the AltSnap.ATG stream. Do not persist HWND, PID or TID.
-2. At each ordinary invocation, find fresh candidates for enabled profiles on the
-   cursor's monitor. Zero/ambiguous matches, failed reads, changed class/owner
-   shape, a visible suspicious peer/dialog or a changed build must refuse the
-   profiled participation. A new version requires setup/validation once again,
-   not approval on every layout. Never learn a new profile automatically from a
-   window's APPWINDOW/style bits or silently broaden an old profile.
-3. Share one read-only owned-topology/identity guard with the selected action;
-   foreground equality would be an explicit-selection policy, not a condition
-   simply deleted from that helper. Automatic mode would additionally require
-   the validated build/profile match. Pin fresh identities only in the current
-   operation and carry them through capture, preflight, observation and the
-   existing guarded rollback. Do not queue or retain temporary permissions.
-4. Before enabling a profile, validate modal, modeless, custom, detached-tab,
-   hidden-main and multiple-instance cases against the same binary. A same-class
-   wrong-role collision disables that profile; exact image/class alone is not an
-   override. The same process/DPI/min-max/blacklist/count/rollback checks must
-   remain authoritative for every application.
-
-This is the proposed **one-time setup alternative**, not a shipped INI option or
-command. It would express the user's explicit build-specific trust and limit
-version drift; it still cannot prove the absence of an untested same-build
-custom-dialog collision. Implementing persistence now without those role tests
-would only store an unvalidated heuristic. A broad allow-owned switch, saved
-HWNDs, focus-changing macros and remapping the standard shortcut to Selected
-would not satisfy the requested safety/workflow conditions and were not added.
-
-### Windows 10 evidence needed before a profile can be enabled
-
-Retain the confirmed controls above. For the actual portable build and theme:
-
-1. With the main window normal, button-maximized and mouse-resized, compare exact
-   candidate and owner class pairs and image/build identity **locally**, outside
-   the trace. The public TMobaXtermForm identifier is a hypothesis to check, not
-   a value presumed present on this machine. For top-level class comparison,
-   AltSnap's existing Blacklist page has an Identify window tool; inspect its
-   result locally without adding a blacklist rule. That tool promotes to GA_ROOT,
-   so it cannot establish child-dialog or owner-class distinctions by itself.
-   No raw class/path/ID logging is needed.
-2. Compare settings/session dialogs, confirmation/password prompts, search/find,
-   editor/tools, detached tabs and every available modeless/custom window. Check
-   with the main surface visible, minimized and hidden where supported. Record
-   categorical main-class match/mismatch, owner-class match/mismatch, enabled
-   states and additional visible same-process surfaces; do not label an
-   unsupported scenario as tested.
-3. Keep another ordinary app focused and use **Ctrl+Alt+G**. In this build expect
-   owned MobaXterm to remain excluded: alone there is no movement; plus three
-   ordinary apps gives three candidates and 1+2; plus four gives four candidates
-   and 2×2 for those four only. Five *eligible* ordinary apps still give too-many.
-   Total open-window count and eligible count are deliberately different.
-4. Use Selected as the existing positive control with its intended surface
-   explicitly focused: repeat one/four/five eligible-window cases, normalization,
-   blacklist/min-max refusal and the previous Linked Grid Resize/recovery check.
-   Repeat with trace off. Test dialog appearance during min/max/placement where
-   practical without assuming that a failed operation must restore an invalid
-   selected identity.
-5. Repeat the role/class/topology comparisons after an application update and in
-   portable/installed or changed-theme modes before treating a profile as reusable.
-   No automatic support is claimed from stub success or a matching public class.
+Portable tests/stubs cover the policy and persistence. CI additionally executes
+real Windows ANSI/Unicode INI, SHA-256 known-vector, changed/empty/oversized image
+and file-sharing-lock tests. These are **not a MobaXterm GUI test**. The user must
+validate the new automatic registered-profile path on the actual Windows 10
+build before treating it as confirmed compatibility.
 
 Sources: Microsoft [GetWindow](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindow),
 [window styles](https://learn.microsoft.com/en-us/windows/win32/winmsg/window-styles),
@@ -596,7 +659,8 @@ AutoTileGrid=839
 839 is Ctrl+Alt+G (G=71, Alt=256, Control=512). An absent entry or
 `AutoTileGrid=0` leaves the command disabled, including in the shipped default
 configuration. The experimental selection shortcut is separate and disabled by default.
-No GUI setting is added. `UsePtWindow` does not affect this
+The profile manager is on the Blacklist page; shortcut UI is unchanged.
+`UsePtWindow` does not affect this
 monitor-wide command: the cursor position at invocation selects the monitor.
 There is no foreground-window initialization. Forward normalization requests
 no activation, and the final positioning batch requests no activation or Z-order
@@ -627,7 +691,7 @@ an infeasible arrangement is refused instead of resized into overlapping cells.
 Only visible, non-cloaked, enabled, resizable top-level windows on the selected
 monitor are considered. Existing snap visibility and process/window blacklist
 helpers are reused. Desktop/shell/taskbars, AltSnap's process and AltSnap.exe,
-tool/no-activate windows, owned windows/dialogs in the ordinary command, minimized, fullscreen,
+tool/no-activate windows, owned windows/dialogs without registered consent, minimized, fullscreen,
 rolled, MoveOnOff-disabled and Bottommost-blacklisted windows are excluded.
 WS_THICKFRAME is required; ResizeAll/AlwaysResize cannot force participation.
 Process identity must be readable. Missing DWM data remains excluded.
@@ -750,10 +814,15 @@ normal/maximized combination, no retained authorization, modal/modeless/custom a
 child dialog refusals, disabled/unknown owners, failed class/process reads,
 blacklists, five participants, min/max/DPI refusal, owner/identity/foreground/style
 races, ordinary recovery and guarded partial recovery after authorization loss.
-Automatic-admission assessment regressions add 576 trace/show-state/focus/role/count
-cases for the unchanged ordinary refusal, a synthetic image/class role collision,
-late modal/modeless creation, peer blacklists/limits and guarded recovery. They
-verify refusal boundaries, not successful automatic MobaXterm recognition.
+The no-consent regressions retain 576 trace/show-state/focus/role/count cases and
+the synthetic role collision. Profile tests add real serializer round trips,
+partial-write failures, invalid enable/schema/hash/style inputs, disable/delete,
+arbitrary executable/class names, absence of foreground, every 1–4 normal/maximized
+combination, multiple profiles/instances, changed build/class/owner identities,
+late modal/modeless dialogs, count/blacklist/size refusals and guarded recovery.
+Native ANSI/Unicode Windows contract tests are compiled in the Linux job and run
+on Windows in a dependent CI job. They check the actual CryptoAPI/INI/file boundary,
+not GUI role recognition.
 ASan/UBSan and MinGW x64 test compilation are supported
 by tests/Makefile.
 
@@ -765,7 +834,7 @@ make -f MakefileX64 -j2 \
 ```
 
 The user-reported Windows 10 results above are established observations; the
-automatic recognition remains unimplemented and remaining GUI scenarios still require testing.
+the new registered-profile path and remaining GUI scenarios still require testing.
 Portable tests do not exercise enumeration, UIPI, DWM, DPI message marshalling,
 DeferWindowPos or recovery against real applications. On Windows, verify:
 

@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
+#include <stdlib.h>
 typedef int32_t LONG;
 typedef uint32_t DWORD;
 typedef unsigned UINT;
@@ -91,7 +92,10 @@ static int class_query_fail, thread_changed, owner_thread_changed;
 static int selected_batch_effect;
 static int selected_dialog_during_limits;
 static int ordinary_dialog_during_limits;
-static const char *model_class, *model_image;
+static int profile_limit_effect, profile_batch_effect;
+static unsigned image_epoch;
+static const char *model_class, *model_image, *model_owner_class;
+static int enumerate_owner;
 static unsigned foreground_queries;
 static char trace_log[16384];
 static size_t trace_used;
@@ -117,11 +121,14 @@ static struct FakeWindow {
     int cloaked, zero, iconic, borderless, snaplisted, snap_changed;
     int shell_kind, class_kind, name_fail, altsnap_exe, limited_only;
     POINT lo, hi;
-} fake[6], fake_owner;
+    const char *class_override, *path_override;
+    int root_self;
+} fake[6], fake_owner, fake_owner2;
 static RECT targets[6];
 static unsigned batch_mask;
 static struct FakeWindow *win(HWND w) {
     if (w==102) { ++owner_queries; return &fake_owner; }
+    if (w==103) { ++owner_queries; return &fake_owner2; }
     assert(w>=1 && w<=count && w<=ARR_SZ(fake)); return &fake[w-1];
 }
 static BOOL EqualRect(const RECT *a, const RECT *b) { return !memcmp(a,b,sizeof *a); }
@@ -146,14 +153,17 @@ static HWND GetWindow(HWND w, int which) {
 }
 static BOOL IsWindow(HWND w) {
     ++owner_queries;
-    return w==102 ? owner_exists : owned_exists;
+    return w==102 ? owner_exists : w==103 ? 1 : owned_exists;
 }
 static HWND GetAncestor(HWND w, UINT which) {
-    (void)w; ++owner_queries; assert(which==GA_ROOT || which==GA_ROOTOWNER);
+    ++owner_queries; assert(which==GA_ROOT || which==GA_ROOTOWNER);
+    if (win(w)->root_self) return w;
     return which==GA_ROOT ? relation_root : relation_rootowner;
 }
 static HWND GetLastActivePopup(HWND w) {
-    assert(w==relation_rootowner); ++owner_queries;
+    ++owner_queries;
+    if (w<=count && win(w)->root_self) return w;
+    assert(w==relation_rootowner);
     if (owner_race==1) owner_exists=0;
     if (owner_race==2) fake[0].owned=2;
     if (owner_race==3) fake[0].owned=0;
@@ -192,7 +202,7 @@ static int GetWindowText(HWND w, TCHAR *buf, size_t n)
 { int k=snprintf(buf,n,"window%u",(unsigned)w); assert(k>0 && (size_t)k<n); return k; }
 static int GetClassName(HWND w, TCHAR *buf, size_t n)
 {
-    const char *name=model_class && w==1 ? model_class : win(w)->class_kind==5 ? "#32770" : "Class";
+    const char *name=win(w)->class_override ? win(w)->class_override : model_owner_class && w==102 ? model_owner_class : model_class && w==1 ? model_class : win(w)->class_kind==5 ? "#32770" : "Class";
     assert(n>strlen(name));
     if (class_query_fail) return 0;
     strcpy(buf,name); return (int)strlen(name);
@@ -201,10 +211,10 @@ static int blacklisted_from_names(const blacklist_t *list, const TCHAR *exe,
                                  const TCHAR *title, const TCHAR *classname)
 {
     unsigned w=0;
-    assert(sscanf(title,"window%u",&w)==1 && !strcmp(classname,model_class && w==1 ? model_class : "Class"));
+    assert(sscanf(title,"window%u",&w)==1 && !strcmp(classname,win(w)->class_override ? win(w)->class_override : model_class && w==1 ? model_class : "Class"));
     /* Every list receives the identity validated by the production lookup,
        including when the old process APIs fail or an unrelated cache is stale. */
-    assert(!strcmp(exe,model_image && win(w)->pid==fake[0].pid ? model_image : win(w)->altsnap_exe ? "AltSnap.exe" : win(w)->limited_only ? "Code.exe" : "test.exe"));
+    assert(!strcmp(exe,win(w)->path_override ? strrchr(win(w)->path_override,'\\')+1 : model_image && win(w)->pid==fake[0].pid ? model_image : win(w)->altsnap_exe ? "AltSnap.exe" : win(w)->limited_only ? "Code.exe" : "test.exe"));
     return win(w)->blacklisted==(int)list->kind;
 }
 static void SetLastError(DWORD error) { ++traced_process_calls; last_error=error; }
@@ -222,7 +232,9 @@ static BOOL CloseHandle(HANDLE proc) { (void)win(proc); ++process_closes; return
 static DWORD process_name(HANDLE proc, TCHAR *buf, DWORD n)
 {
     const char *name=win(proc)->altsnap_exe ? "C:\\Apps\\AltSnap.exe" : win(proc)->limited_only ? "C:\\Apps\\Code.exe" : "C:\\Apps\\test.exe";
-    if (model_image && win(proc)->pid==fake[0].pid) {
+    if (win(proc)->path_override) {
+        name=win(proc)->path_override;
+    } else if (model_image && win(proc)->pid==fake[0].pid) {
         int length=snprintf(buf,n,"C:\\Apps\\%s",model_image);
         assert(length>0 && (DWORD)length<n); return (DWORD)length;
     }
@@ -240,6 +252,7 @@ static size_t PathGetFileNameStart(const TCHAR *name)
 static void PathStripPathL(TCHAR *name)
 { size_t i=PathGetFileNameStart(name); memmove(name,name+i,strlen(name+i)+1); }
 static int lstrcmpi(const TCHAR *a, const char *b) { return strcmp(a,b); }
+static int lstrcmp(const TCHAR *a, const TCHAR *b) { return strcmp(a,b); }
 static UINT GetDpiForWindow(HWND w) { return (UINT)win(w)->dpi; }
 static HANDLE dpi_context(HWND w) { return (HANDLE)win(w)->aware; }
 static int dpi_awareness(HANDLE context) { return (int)context; }
@@ -283,6 +296,17 @@ static int GetMinMaxInfoF(HWND w, POINT *lo, POINT *hi, int ignore)
             fake[0].enabled=fake_owner.enabled=0;
         }
     }
+    if (profile_limit_effect && captures==1 && w==count) {
+        if (profile_limit_effect==1) fake[0].owned=2;
+        if (profile_limit_effect==2) model_class="ChangedMain";
+        if (profile_limit_effect==3) model_owner_class="ChangedOwner";
+        if (profile_limit_effect==4) fake[0].pid++;
+        if (profile_limit_effect==5) fake_owner.pid++;
+        if (profile_limit_effect==6) thread_changed=1;
+        if (profile_limit_effect==7) owner_thread_changed=1;
+        if (profile_limit_effect==8) { fake[0].enabled=0; fake_owner.enabled=0; }
+        if (profile_limit_effect==9) ++image_epoch;
+    }
     return !win(w)->min_fail;
 }
 static int GetMonitorInfo(HMONITOR m, MONITORINFO *mi)
@@ -297,6 +321,8 @@ static int EnumDesktopWindows(void *desktop, BOOL (*callback)(HWND,LPARAM), LPAR
         for (repeat=0;repeat<(w==1 ? enum_repeats : 1);++repeat)
             if (!callback(next,lp)) return 0;
     }
+    if (enumerate_owner && !callback(102,lp)) return 0;
+    if (enumerate_owner && fake_owner2.visible && !callback(103,lp)) return 0;
     return 1;
 }
 static BOOL EnumWindows(BOOL (*callback)(HWND,LPARAM), LPARAM lp)
@@ -305,6 +331,8 @@ static BOOL EnumWindows(BOOL (*callback)(HWND,LPARAM), LPARAM lp)
     ++selected_scans;
     if (selected_scan_fail) return 0;
     for (w=1;w<=count;++w) if (!callback(w,lp)) return 0;
+    if (enumerate_owner && !callback(102,lp)) return 0;
+    if (enumerate_owner && fake_owner2.visible && !callback(103,lp)) return 0;
     if ((int)selected_scans==selected_effect_at) {
         if (selected_effect==1) fake[0].owned=2;
         if (selected_effect==2) fake[0].owned=0;
@@ -355,6 +383,9 @@ static int EndDeferWindowPos(HDWP b)
     if (selected_batch_effect==3) fake_owner.enabled=0;
     if (selected_batch_effect==4) foreground=0;
     if (selected_batch_effect==5) relation_popup=102;
+    if (profile_batch_effect==1) fake[0].owned=2;
+    if (profile_batch_effect==2) model_class="ChangedMain";
+    if (profile_batch_effect==3) model_owner_class="ChangedOwner";
     if (cancel_batch) ++generation;
     if (start_drag) state.action.ac=1;
     return !fail_batch;
@@ -417,6 +448,53 @@ static int SetWindowPlacement(HWND w, const WINDOWPLACEMENT *p)
     return 1;
 }
 static void ClearRestoreFlagOnResizeIfNeeded(HWND w) { (void)w; ++clears; }
+#define wsprintf wsprintfA
+static const char *const ini_keys[]={"Enabled","Schema","Topology","Path","SHA256","Class","OwnerClass","Style","ExStyle","OwnerStyle","OwnerExStyle"};
+static char ini_values[8][11][300];
+static unsigned ini_reads, ini_writes;
+static int ini_fail_write;
+static unsigned ini_slot(const char *section)
+{
+    unsigned n=0; assert(sscanf(section,"AutoTileOwned%u",&n)==1 && n>=1 && n<=8); return n-1;
+}
+static unsigned ini_key(const char *key)
+{
+    unsigned i; for(i=0;i<ARR_SZ(ini_keys) && strcmp(ini_keys[i],key);++i) { }
+    assert(i<ARR_SZ(ini_keys)); return i;
+}
+static DWORD GetPrivateProfileString(const char *section, const char *key, const char *def,
+                                     char *out, unsigned n, const char *ini)
+{
+    const char *value=ini_values[ini_slot(section)][ini_key(key)]; size_t k;
+    (void)ini; ++ini_reads; if (!value[0]) value=def;
+    k=strlen(value); if(k>=n) k=n-1; memcpy(out,value,k); out[k]=0; return (DWORD)k;
+}
+static int WritePrivateProfileString(const char *section, const char *key, const char *value, const char *ini)
+{
+    unsigned slot=ini_slot(section); (void)ini;
+    ++ini_writes; if ((int)ini_writes==ini_fail_write) return 0;
+    if (!key) { mem00(ini_values[slot],sizeof ini_values[slot]); return 1; }
+    assert(!value || strlen(value)<300);
+    strcpy(ini_values[slot][ini_key(key)],value ? value : ""); return 1;
+}
+#include "../auto_tile_owned_store.h"
+typedef struct { HANDLE file; unsigned epoch; } ATGOwnedImage;
+static TCHAR image_digest[65];
+static unsigned image_opens, image_closes, image_live;
+static int image_open_fail;
+static int ATGOwnedImageOpen(const TCHAR *path, TCHAR digest[65], ATGOwnedImage *image)
+{
+    image->file=0;
+    if (image_open_fail || !ATGOwnedLocalPath(path)) return 0;
+    ++image_opens; ++image_live; image->file=1; image->epoch=image_epoch;
+    strcpy(digest,image_digest); return 1;
+}
+static int ATGOwnedImageStable(const ATGOwnedImage *image)
+{ return image->file && image->epoch==image_epoch; }
+static void ATGOwnedImageClose(ATGOwnedImage *image)
+{
+    if(image->file) { assert(image_live); --image_live; ++image_closes; image->file=0; }
+}
 #include "../auto_tile_grid_win.h"
 
 static void reset(unsigned n)
@@ -432,13 +510,20 @@ static void reset(unsigned n)
     owner_exists=owned_exists=1; owner_race=owner_style_fail=0;
     relation_root=relation_popup=1; relation_rootowner=102;
     mem00(&fake_owner,sizeof fake_owner); fake_owner.pid=1;
+    mem00(&fake_owner2,sizeof fake_owner2);
     foreground=0; selected_scans=0;
     selected_scan_fail=selected_effect=selected_effect_at=0;
     class_query_fail=thread_changed=owner_thread_changed=0;
     selected_batch_effect=0;
     selected_dialog_during_limits=0;
     ordinary_dialog_during_limits=0;
-    model_class=model_image=NULL; foreground_queries=0;
+    profile_limit_effect=profile_batch_effect=0;
+    model_class=model_image=model_owner_class=NULL; foreground_queries=0; enumerate_owner=0;
+    mem00(auto_tile_owned_profiles,sizeof auto_tile_owned_profiles); auto_tile_owned_enabled=0;
+    mem00(ini_values,sizeof ini_values); ini_reads=ini_writes=0; ini_fail_write=0;
+    assert(!image_live && image_opens==image_closes);
+    image_epoch=image_opens=image_closes=0; image_open_fail=0;
+    memset(image_digest,'a',64); image_digest[64]=0;
     fail_normalize=fail_max_restore=normalize_effect=normalize_effect_at=0;
     placement_fail=change_placement_preflight=fail_begin=0;
     monitor_rect=(RECT){0,0,1200,1000}; work_rect=(RECT){0,0,1200,960};
@@ -1164,13 +1249,219 @@ static void ordinary_owned_refusals(void)
         assert(!positions && !clears && !normalizes && !selected_scans && !foreground_queries);
     }
 }
+static void profile_setup(unsigned n, unsigned trace, int enabled)
+{
+    ATGOwnedProfile p;
+    selected_setup(n,trace); foreground=101;
+    model_class="TrustedMain"; model_owner_class="ToolkitOwner";
+    model_image="PortableRenamed.exe";
+    enumerate_owner=1; fake_owner.monitor=1;
+    assert(ATGOwnedEnroll(1,&p) && p.valid && !p.enabled);
+    assert(ATGOwnedProfileSave("test.ini",0,&p));
+    if (enabled) assert(ATGOwnedProfileEnable("test.ini",0,1));
+    AutoTileOwnedLoad("test.ini");
+    assert(auto_tile_owned_enabled==(unsigned)enabled);
+}
+
+static void profile_store_tests(void)
+{
+    ATGOwnedProfile p, readback;
+    unsigned i;
+    profile_setup(1,0,0);
+    assert(ATGOwnedProfileRead("test.ini",0,&p) && !p.enabled);
+    assert(!strcmp(p.path,"C:\\Apps\\PortableRenamed.exe") && strlen(p.digest)==64);
+    assert(!strcmp(p.candidate_class,"TrustedMain") && !strcmp(p.owner_class,"ToolkitOwner"));
+    /* Save ignores an input enabled flag: enrollment always starts disabled. */
+    p.enabled=1; assert(ATGOwnedProfileSave("test.ini",1,&p));
+    assert(ATGOwnedProfileRead("test.ini",1,&readback) && !readback.enabled);
+    assert(ATGOwnedProfileEnable("test.ini",1,1));
+    assert(ATGOwnedProfileRead("test.ini",1,&readback) && readback.enabled);
+    assert(ATGOwnedProfileDelete("test.ini",1));
+    assert(!ATGOwnedProfileRead("test.ini",1,&readback) && !readback.enabled);
+    {
+        unsigned writes=ini_writes;
+        ATGOwnedProfile unsafe=p;
+        strcpy(unsafe.candidate_class,"Main\r\nEnabled=1");
+        assert(!ATGOwnedProfileSave("test.ini",1,&unsafe) && ini_writes==writes);
+        strcpy(unsafe.candidate_class,"\"quoted\"");
+        assert(!ATGOwnedProfileSave("test.ini",1,&unsafe) && ini_writes==writes);
+    }
+    for (i=1;i<=12;++i) {
+        mem00(ini_values,sizeof ini_values); ini_writes=0; ini_fail_write=(int)i;
+        assert(!ATGOwnedProfileSave("test.ini",0,&p));
+        ATGOwnedProfileRead("test.ini",0,&readback); assert(!readback.enabled);
+        AutoTileOwnedLoad("test.ini"); assert(!auto_tile_owned_enabled);
+    }
+    ini_fail_write=0; assert(ATGOwnedProfileSave("test.ini",0,&p));
+    assert(ATGOwnedProfileEnable("test.ini",0,1));
+    for (i=0;i<6;++i) {
+        assert(ATGOwnedProfileSave("test.ini",0,&p));
+        assert(ATGOwnedProfileEnable("test.ini",0,1));
+        if(i==0) strcpy(ini_values[0][ini_key("Schema")],"2");
+        if(i==1) ini_values[0][ini_key("SHA256")][0]='z';
+        if(i==2) strcpy(ini_values[0][ini_key("Path")],"\\\\server\\app.exe");
+        if(i==3) strcpy(ini_values[0][ini_key("Class")],"#32770");
+        if(i==4) strcpy(ini_values[0][ini_key("Style")],"ffffffff");
+        if(i==5) strcpy(ini_values[0][ini_key("Enabled")],"yes");
+        assert(!ATGOwnedProfileRead("test.ini",0,&readback) && readback.enabled);
+        AutoTileOwnedLoad("test.ini"); invoke(); unchanged(); assert(!positions);
+        assert(ATGOwnedProfileEnable("test.ini",0,0)); /* Invalid records remain disableable. */
+    }
+    assert(ATGOwnedProfileDelete("test.ini",0)); AutoTileOwnedLoad("test.ini");
+    assert(!auto_tile_owned_enabled && !image_live && image_opens==image_closes);
+}
+
+static void registered_profile_layouts(void)
+{
+    unsigned trace, n, mask, i, kind;
+    for(trace=0;trace<=1;++trace) {
+        for(n=1;n<=4;++n) for(mask=0;mask<(1u<<n);++mask) {
+            profile_setup(n,trace,1);
+            for(i=0;i<n;++i) if(mask&(1u<<i)) maximize(i);
+            invoke(); assert(positions==n && clears==n && !restores && !max_restores);
+            assert(!foreground_queries && !image_live && image_opens==image_closes);
+            i=positions; invoke(); assert(positions==i); /* Fixed point, fresh operation witnesses. */
+            assert(!image_live && image_opens==image_closes);
+            if(!trace) assert(!trace_lines);
+        }
+        profile_setup(4,trace,0);
+        {
+            unsigned scans=selected_scans, reads=ini_reads, opens=image_opens;
+            invoke(); assert(positions==3 && !foreground_queries && selected_scans==scans);
+            assert(ini_reads==reads && image_opens==opens); /* Disabled means original path. */
+        }
+        profile_setup(4,trace,1);
+        assert(ATGOwnedProfileEnable("test.ini",0,0)); AutoTileOwnedLoad("test.ini");
+        invoke(); assert(positions==3 && EqualRect(&fake[0].native,&fake[0].original));
+        profile_setup(4,trace,1);
+        assert(ATGOwnedProfileDelete("test.ini",0)); AutoTileOwnedLoad("test.ini");
+        invoke(); assert(positions==3);
+        /* A changed binary, classes, topology or an unreadable participant
+           cannot silently fall back to arranging only its peers. */
+        for(kind=0;kind<22;++kind) {
+            profile_setup(4,trace,1);
+            if(kind==0) image_digest[0]='b';
+            if(kind==1) image_open_fail=1;
+            if(kind==2) model_class="ChangedMain";
+            if(kind==3) model_owner_class="ChangedOwner";
+            if(kind==4) fake[0].enabled=0;
+            if(kind==5) fake_owner.enabled=0;
+            if(kind==6) fake_owner.visible=0;
+            if(kind==7) fake[0].style|=WS_POPUP;
+            if(kind==8) fake[0].exstyle=0;
+            if(kind==9) relation_popup=102;
+            if(kind==10) fake[0].owned=0;
+            if(kind==11) fake_owner.pid++;
+            if(kind==12) fake[0].name_fail=1;
+            if(kind==13) fake[0].min_fail=1;
+            if(kind==14) fake[0].dpi=120;
+            if(kind==15) fake[0].lo.x=1800;
+            if(kind==16) fake[0].blacklisted=1;
+            if(kind==17) fake[0].blacklisted=2;
+            if(kind==18) fake[0].blacklisted=3;
+            if(kind==19) model_image="RenamedAgain.exe";
+            if(kind==20) strcpy(ini_values[0][ini_key("Schema")],"99");
+            if(kind==21) model_class="#32770";
+            if(kind==20) AutoTileOwnedLoad("test.ini");
+            invoke(); unchanged(); assert(!positions && !normalizes && !clears && !image_live);
+            assert(!foreground_queries);
+        }
+        /* Ordinary-app peers keep their previous blacklist behavior. */
+        for(kind=1;kind<=3;++kind) {
+            profile_setup(4,trace,1); fake[1].blacklisted=(int)kind;
+            invoke(); assert(positions==3 && EqualRect(&fake[1].native,&fake[1].original));
+        }
+        /* Visible modal/modeless/custom/tool surfaces of the trusted process
+           block even if ordinary eligibility would have omitted that surface. */
+        for(kind=0;kind<5;++kind) {
+            profile_setup(4,trace,1); fake[1].pid=1;
+            if(kind==0) fake[1].enabled=0;
+            if(kind==1) fake[1].exstyle=WS_EX_TOOLWINDOW;
+            if(kind==2) { fake[1].owned=1; fake[1].style|=WS_POPUP; }
+            if(kind==3) fake[1].class_override="#32770";
+            if(kind==4) fake[1].class_override="TrustedMain";
+            invoke(); unchanged(); assert(!positions && !normalizes);
+        }
+        /* Same class in an unregistered image is not admitted; the ambiguity
+           cancels the opt-in layout rather than trusting its style/name. */
+        profile_setup(4,trace,1);
+        fake[1].owned=1; fake[1].class_override="TrustedMain";
+        invoke(); unchanged(); assert(!positions);
+        /* Multiple instances of the registered image on this monitor. */
+        profile_setup(4,trace,1);
+        fake[1].owned=2; fake[1].class_override="TrustedMain";
+        fake[1].path_override="C:\\Apps\\PortableRenamed.exe";
+        invoke(); unchanged(); assert(!positions);
+        /* Duplicate enabled registrations are also ambiguous. */
+        profile_setup(4,trace,1);
+        {
+            ATGOwnedProfile p;
+            assert(ATGOwnedProfileRead("test.ini",0,&p));
+            assert(ATGOwnedProfileSave("test.ini",1,&p) && ATGOwnedProfileEnable("test.ini",1,1));
+            AutoTileOwnedLoad("test.ini"); invoke(); unchanged(); assert(!positions);
+        }
+        profile_setup(5,trace,1); maximize(0); invoke(); unchanged(); assert(!positions && !normalizes);
+        for(kind=0;kind<4;++kind) for(mask=0;mask<2;++mask) {
+            profile_setup(4,trace,1); if(mask) maximize(0);
+            if(kind==0) fake[0].behavior=1;
+            if(kind==1) fail_batch=1;
+            if(kind==2) fail_begin=1;
+            if(kind==3) fail_defer=1;
+            invoke(); unchanged(); assert(!clears && !image_live);
+            if(mask) assert(max_restores==1);
+        }
+        for(kind=1;kind<=9;++kind) {
+            profile_setup(4,trace,1); profile_limit_effect=(int)kind;
+            invoke(); unchanged(); assert(!positions && !normalizes && !image_live);
+        }
+        for(kind=1;kind<=2;++kind) {
+            profile_setup(4,trace,1); ordinary_dialog_during_limits=(int)kind;
+            invoke(); unchanged(); assert(!positions && !normalizes);
+        }
+        for(kind=1;kind<=3;++kind) {
+            profile_setup(4,trace,1); profile_batch_effect=(int)kind;
+            invoke(); assert(positions==4 && restores==3 && !clears && !image_live);
+            assert(!EqualRect(&fake[0].native,&fake[0].original));
+            for(i=1;i<4;++i) assert(EqualRect(&fake[i].native,&fake[i].original));
+        }
+        /* The explicit Selected tool ignores profile configuration, as before. */
+        profile_setup(1,trace,1); strcpy(ini_values[0][ini_key("Schema")],"99");
+        AutoTileOwnedLoad("test.ini"); foreground=1;
+        invoke_selected(); assert(positions==1);
+        assert(!strstr(trace_log,"PortableRenamed.exe") && !strstr(trace_log,"TrustedMain")
+               && !strstr(trace_log,"ToolkitOwner") && !strstr(trace_log,"aaaaaaaa"));
+        /* Two independently trusted applications use the same generic guard. */
+        profile_setup(4,trace,1);
+        fake[1].pid=55; fake[1].owned=2; fake[1].exstyle=WS_EX_APPWINDOW; fake[1].root_self=1;
+        fake[1].class_override="OtherMain"; fake[1].path_override="C:\\Apps\\Other.exe";
+        fake_owner2=fake_owner; fake_owner2.pid=55;
+        fake_owner2.class_override="OtherOwner"; fake_owner2.path_override="C:\\Apps\\Other.exe";
+        {
+            ATGOwnedProfile p;
+            assert(ATGOwnedEnroll(2,&p));
+            assert(ATGOwnedProfileSave("test.ini",1,&p) && ATGOwnedProfileEnable("test.ini",1,1));
+            AutoTileOwnedLoad("test.ini"); invoke(); assert(positions==4 && !image_live);
+        }
+        /* Same generic topology in an unrelated class/image stays excluded. */
+        profile_setup(4,trace,1);
+        fake[1].owned=2; fake[1].exstyle=WS_EX_APPWINDOW; fake[1].root_self=1;
+        fake[1].class_override="UntrustedMain";
+        invoke(); assert(positions==3 && EqualRect(&fake[1].native,&fake[1].original));
+        /* A profile is consent, not a semantic-role certificate. A synthetic
+           indistinguishable custom surface can match if the real main is hidden. */
+        profile_setup(2,trace,1); fake[1].pid=1; fake[1].visible=0;
+        invoke(); assert(positions==1 && EqualRect(&fake[1].native,&fake[1].original));
+    }
+}
 int main(void)
 {
     layouts_and_refusals(); exclusions(); recovery_and_drag(); maximized_and_overhang(); diagnostic_trace(); limited_fallback_and_owner_safety();
     owner_topology_trace();
     explicitly_selected_owned();
     owned_role_ambiguity(); ordinary_owned_refusals();
-    puts("auto_tile_grid_owned_roles: synthetic EXE/class role collision, ordinary focus-independent owner refusal, dialog states, peers and rollback passed (no automatic owned admission)");
+    profile_store_tests(); registered_profile_layouts();
+    puts("auto_tile_grid_profiles: disabled consent persistence, build/class checks, foreground-independent layouts, ambiguous/dialog refusals and guarded rollback passed");
+    puts("auto_tile_grid_owned_roles: synthetic EXE/class role collision, ordinary focus-independent owner refusal, dialog states, peers and rollback passed (no implicit admission without registered consent)");
     puts("auto_tile_grid_selected: one-shot selection, strict guards, modal/modeless dialogs, stale identities, blacklists, five windows and guarded rollback passed (no Windows GUI)");
     puts("auto_tile_grid_win_stubs: layouts, recovery, exclusions, owner topology/races, 4096 trace on/off combinations and fixed log vocabulary passed (no Windows GUI)");
     return 0;

@@ -36,6 +36,18 @@ jobs:
           make -f MakefileX64 -j2
           CC=x86_64-w64-mingw32-gcc-win32
           WR=x86_64-w64-mingw32-windres
+      - name: Build native Windows profile contract tests
+        run: |
+          mkdir -p work/native-profile-tests
+          cp AltSnap.exe work/native-profile-tests/
+          x86_64-w64-mingw32-gcc-win32 -O2 -std=c99 -Wall -Wextra -Werror -pedantic tests/auto_tile_owned_native_test.c -luser32 -o work/native-profile-tests/profile-ansi.exe
+          x86_64-w64-mingw32-gcc-win32 -O2 -std=c99 -Wall -Wextra -Werror -pedantic -D_UNICODE -DUNICODE tests/auto_tile_owned_native_test.c -luser32 -o work/native-profile-tests/profile-unicode.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: owned-profile-native-tests
+          path: work/native-profile-tests/*.exe
+          retention-days: 1
+          if-no-files-found: error
       - name: Package and inspect portable ZIP
         run: tests/package_linked_grid_win64.sh work/portable
       - uses: actions/upload-artifact@v4
@@ -44,3 +56,20 @@ jobs:
           path: work/portable/${{ env.PACKAGE_NAME }}.zip
           if-no-files-found: error
           retention-days: 7
+
+  native-profile-contracts:
+    needs: build
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: owned-profile-native-tests
+          path: native-tests
+      - name: Test actual Windows CryptoAPI and INI contracts
+        shell: pwsh
+        run: |
+          & ./native-tests/profile-ansi.exe
+          if ($LASTEXITCODE -ne 0) { throw "ANSI profile contract failed" }
+          & ./native-tests/profile-unicode.exe
+          if ($LASTEXITCODE -ne 0) { throw "Unicode profile contract failed" }
