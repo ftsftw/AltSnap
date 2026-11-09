@@ -90,6 +90,9 @@ static int selected_scan_fail, selected_effect, selected_effect_at;
 static int class_query_fail, thread_changed, owner_thread_changed;
 static int selected_batch_effect;
 static int selected_dialog_during_limits;
+static int ordinary_dialog_during_limits;
+static const char *model_class, *model_image;
+static unsigned foreground_queries;
 static char trace_log[16384];
 static size_t trace_used;
 static int wsprintfA(char *buf, const char *fmt, ...)
@@ -135,7 +138,7 @@ static DWORD GetWindowThreadProcessId(HWND w, DWORD *pid)
 static DWORD GetCurrentProcessId(void) { return 999; }
 static HWND GetDesktopWindow(void) { return fake[0].shell_kind==1 ? 1 : 100; }
 static HWND GetShellWindow(void) { return fake[0].shell_kind==2 ? 1 : 101; }
-static HWND GetForegroundWindow(void) { return foreground; }
+static HWND GetForegroundWindow(void) { ++foreground_queries; return foreground; }
 static HWND GetWindow(HWND w, int which) {
     assert(which==GW_OWNER); ++owner_link_queries;
     if (win(w)->owned==3) return w;
@@ -189,7 +192,7 @@ static int GetWindowText(HWND w, TCHAR *buf, size_t n)
 { int k=snprintf(buf,n,"window%u",(unsigned)w); assert(k>0 && (size_t)k<n); return k; }
 static int GetClassName(HWND w, TCHAR *buf, size_t n)
 {
-    const char *name=win(w)->class_kind==5 ? "#32770" : "Class";
+    const char *name=model_class && w==1 ? model_class : win(w)->class_kind==5 ? "#32770" : "Class";
     assert(n>strlen(name));
     if (class_query_fail) return 0;
     strcpy(buf,name); return (int)strlen(name);
@@ -198,10 +201,10 @@ static int blacklisted_from_names(const blacklist_t *list, const TCHAR *exe,
                                  const TCHAR *title, const TCHAR *classname)
 {
     unsigned w=0;
-    assert(sscanf(title,"window%u",&w)==1 && !strcmp(classname,"Class"));
+    assert(sscanf(title,"window%u",&w)==1 && !strcmp(classname,model_class && w==1 ? model_class : "Class"));
     /* Every list receives the identity validated by the production lookup,
        including when the old process APIs fail or an unrelated cache is stale. */
-    assert(!strcmp(exe,win(w)->altsnap_exe ? "AltSnap.exe" : win(w)->limited_only ? "Code.exe" : "test.exe"));
+    assert(!strcmp(exe,model_image && win(w)->pid==fake[0].pid ? model_image : win(w)->altsnap_exe ? "AltSnap.exe" : win(w)->limited_only ? "Code.exe" : "test.exe"));
     return win(w)->blacklisted==(int)list->kind;
 }
 static void SetLastError(DWORD error) { ++traced_process_calls; last_error=error; }
@@ -219,6 +222,10 @@ static BOOL CloseHandle(HANDLE proc) { (void)win(proc); ++process_closes; return
 static DWORD process_name(HANDLE proc, TCHAR *buf, DWORD n)
 {
     const char *name=win(proc)->altsnap_exe ? "C:\\Apps\\AltSnap.exe" : win(proc)->limited_only ? "C:\\Apps\\Code.exe" : "C:\\Apps\\test.exe";
+    if (model_image && win(proc)->pid==fake[0].pid) {
+        int length=snprintf(buf,n,"C:\\Apps\\%s",model_image);
+        assert(length>0 && (DWORD)length<n); return (DWORD)length;
+    }
     assert(strlen(name)<n); strcpy(buf,name); return (DWORD)strlen(name);
 }
 static DWORD module_name(HANDLE proc, HMODULE module, LPTSTR buf, DWORD n)
@@ -268,6 +275,14 @@ static int GetMinMaxInfoF(HWND w, POINT *lo, POINT *hi, int ignore)
     if (change_preflight && captures==2 && w==count) fake[0].native.left++;
     if (change_placement_preflight && captures==2 && w==count) fake[0].placement.rcNormalPosition.left++;
     if (selected_dialog_during_limits && captures==1 && w==count) fake[count-1].pid=1;
+    if (ordinary_dialog_during_limits && captures==1 && w==count) {
+        fake[count-1].pid=1; fake[count-1].owned=1;
+        fake[count-1].exstyle=WS_EX_APPWINDOW;
+        if (ordinary_dialog_during_limits==1) {
+            fake[count-1].class_kind=5;
+            fake[0].enabled=fake_owner.enabled=0;
+        }
+    }
     return !win(w)->min_fail;
 }
 static int GetMonitorInfo(HMONITOR m, MONITORINFO *mi)
@@ -422,6 +437,8 @@ static void reset(unsigned n)
     class_query_fail=thread_changed=owner_thread_changed=0;
     selected_batch_effect=0;
     selected_dialog_during_limits=0;
+    ordinary_dialog_during_limits=0;
+    model_class=model_image=NULL; foreground_queries=0;
     fail_normalize=fail_max_restore=normalize_effect=normalize_effect_at=0;
     placement_fail=change_placement_preflight=fail_begin=0;
     monitor_rect=(RECT){0,0,1200,1000}; work_rect=(RECT){0,0,1200,960};
@@ -1048,11 +1065,112 @@ static void explicitly_selected_owned(void)
                && !strstr(trace_log,"test.exe") && !strstr(trace_log,"C:\\"));
     }
 }
+/* Counterexample to treating a validated resize target as a main-window
+   classifier. These are SYNTHETIC role assignments, not observations of actual
+   MobaXterm dialogs. The same EXE/class/topology can represent different roles;
+   the Win32 model, like these APIs, has no trusted application-role field. */
+static void owned_role_ambiguity(void)
+{
+    ATGSelectedOwned selected={1,102,1,10,10};
+    ATGSnapshot main_sample, dialog_sample;
+    TCHAR main_class[64], dialog_class[64], main_exe[MAX_PATH], dialog_exe[MAX_PATH];
+    selected_setup(2,0);
+    model_class="TMobaXtermForm"; model_image="MobaXterm.exe";
+    fake[1].pid=1; fake[1].visible=0; /* Hidden auxiliary surface in this scenario. */
+    assert(GetClassName(1,main_class,ARR_SZ(main_class)));
+    assert(GetWindowProgName(1,main_exe,ARR_SZ(main_exe)));
+    assert(AutoTileSelectedOwnedValid(&selected));
+    assert(AutoTileCapture(1,&main_sample,&selected));
+    /* In a different UI state the sole visible surface is a custom/modeless
+       dialog sharing the class; a real main surface may be hidden. Changing
+       only its semantic role leaves every observable in this fixture equal. */
+    assert(GetClassName(1,dialog_class,ARR_SZ(dialog_class)));
+    assert(GetWindowProgName(1,dialog_exe,ARR_SZ(dialog_exe)));
+    assert(!strcmp(main_class,dialog_class) && !strcmp(main_exe,dialog_exe));
+    assert(AutoTileSelectedOwnedValid(&selected));
+    assert(AutoTileCapture(1,&dialog_sample,&selected));
+    assert(AutoTileUnchanged(&main_sample,&dialog_sample));
+    /* Ordinary mode rejects both, including when an unrelated app has focus.
+       Explicit selection is intentional authorization, not proof of role. */
+    foreground=0;
+    main_sample.selected=NULL;
+    assert(!AutoTileEligible(1,&main_sample,NULL));
+    assert(AutoTileCapture(1,&dialog_sample,NULL)==0);
+    assert(!positions && !normalizes && !trace_lines);
+}
+
+static void ordinary_owned_refusals(void)
+{
+    unsigned trace, n, show, focus, role, kind;
+    for (trace=0;trace<=1;++trace)
+    for (n=1;n<=6;++n) {
+        if (n==2 || n==3) continue;
+        for (show=0;show<3;++show) for (focus=0;focus<3;++focus)
+        for (role=0;role<8;++role) {
+            selected_setup(n,trace);
+            model_class="TMobaXtermForm"; model_image="MobaXterm.exe";
+            foreground=focus==0 ? 0 : focus==1 ? 1 : 101; /* Unrelated foreground. */
+            if (show==1) maximize(0);
+            if (show==2) { /* Ordinary mouse-resized surface. */
+                fake[0].native=fake[0].original=(RECT){31,40,811,740};
+                fake[0].placement.rcNormalPosition=fake[0].native;
+                fake[0].original_placement=fake[0].placement;
+            }
+            if (role==1) { /* Observed modal state: both surfaces disabled. */
+                fake[0].enabled=fake_owner.enabled=0; model_class="#32770";
+            }
+            if (role==2) model_class="TModelessDialog";
+            /* role 3: synthetic custom dialog indistinguishable from role 0. */
+            if (role==4) model_image="OtherApplication.exe";
+            if (role==5) model_class="TMobaXtermFormNext"; /* Hypothetical changed build. */
+            if (role==6) fake_owner.pid=7654321;
+            if (role==7) { class_query_fail=n==1; fake[0].name_fail=1; }
+            invoke();
+            assert(EqualRect(&fake[0].native,&fake[0].original));
+            assert(AutoTileSamePlacement(&fake[0].placement,&fake[0].original_placement));
+            assert(!normalizes && !max_restores && !foreground_queries && !selected_scans);
+            if (n<=5) assert(positions==n-1 && clears==n-1);
+            else { unchanged(); assert(!positions && !clears); } /* Five eligible peers. */
+            if (!trace) assert(!trace_lines && !owner_queries && !diagnostic_queries && !traced_process_calls);
+            assert(!strstr(trace_log,"TMobaXtermForm") && !strstr(trace_log,"MobaXterm.exe")
+                   && !strstr(trace_log,"OtherApplication.exe") && !strstr(trace_log,"TModelessDialog"));
+        }
+    }
+    /* Peer limits/blacklists and guarded recovery remain active while a
+       Moba-like main surface or a look-alike owned dialog is omitted. */
+    for (trace=0;trace<=1;++trace) for (kind=0;kind<6;++kind) {
+        selected_setup(4,trace); foreground=101;
+        model_class="TMobaXtermForm"; model_image="MobaXterm.exe";
+        maximize(0);
+        if (kind<3) fake[1].blacklisted=(int)kind+1;
+        if (kind==3) fake[1].lo.x=1800;
+        if (kind==4) fake[1].behavior=1;
+        if (kind==5) fail_batch=1;
+        invoke();
+        assert(EqualRect(&fake[0].native,&fake[0].original) && !normalizes && !max_restores);
+        if (kind<3) {
+            assert(positions==2 && clears==2);
+            assert(EqualRect(&fake[1].native,&fake[1].original));
+        } else { unchanged(); assert(!clears); }
+        if (kind==3) assert(!positions);
+        if (kind>=4) assert(restores==3);
+    }
+    /* An owned dialog appears while a peer's min/max callback runs. The
+       subsequent capture may observe it, but it never becomes a participant. */
+    for (trace=0;trace<=1;++trace) for (kind=1;kind<=2;++kind) {
+        selected_setup(4,trace); foreground=101; ordinary_dialog_during_limits=(int)kind;
+        model_class="TMobaXtermForm"; model_image="MobaXterm.exe";
+        invoke(); unchanged();
+        assert(!positions && !clears && !normalizes && !selected_scans && !foreground_queries);
+    }
+}
 int main(void)
 {
     layouts_and_refusals(); exclusions(); recovery_and_drag(); maximized_and_overhang(); diagnostic_trace(); limited_fallback_and_owner_safety();
     owner_topology_trace();
     explicitly_selected_owned();
+    owned_role_ambiguity(); ordinary_owned_refusals();
+    puts("auto_tile_grid_owned_roles: synthetic EXE/class role collision, ordinary focus-independent owner refusal, dialog states, peers and rollback passed (no automatic owned admission)");
     puts("auto_tile_grid_selected: one-shot selection, strict guards, modal/modeless dialogs, stale identities, blacklists, five windows and guarded rollback passed (no Windows GUI)");
     puts("auto_tile_grid_win_stubs: layouts, recovery, exclusions, owner topology/races, 4096 trace on/off combinations and fixed log vocabulary passed (no Windows GUI)");
     return 0;
