@@ -12,7 +12,12 @@ builds nor starts AltSnap. Outputs go to ignored `work/linked-grid-tests/`.
 It also runs the production AutoTileGrid adapter against deterministic Win32
 stubs: eligible/other-monitor windows, repeated layouts, DPI and size refusals,
 preflight changes, failed batches, +107 px application corrections, guarded
-rollback and active/pending drag exclusion. This does not run Windows GUI code.
+rollback and active/pending drag exclusion. AutoTileGrid coverage also includes
+all 30 normal/maximized state combinations for 1–4 windows, remeasuring normal
+borders after normalization, overhang at every edge, negative workspace origins
+with top/left taskbars, changed enumeration order, original full placement
+recovery, partial normalization/API failures, late show-state/DPI/identity/monitor
+changes and opt-in diagnostics. This does not run Windows GUI code.
 Warnings are errors. To check address and undefined behaviour sanitizers:
 
 ```

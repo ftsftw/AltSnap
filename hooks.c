@@ -6941,6 +6941,7 @@ __declspec(dllexport) WNDPROC WINAPI Load(HWND mainhwnd, const TCHAR *inipath)
     // [General]
     GetPrivateProfileSection(TEXT("General"), inisection, inisectionlen, inipath);
     readalluchars(&conf.AutoFocus, inisection, General_uchars, ARR_SZ(General_uchars));
+    auto_tile_trace = GetSectionOptionInt(inisection, "AutoTileTrace", 0) == 1;
     if (conf.LinkedGridResize) {
         linked_trace = GetSectionOptionInt(inisection, "LinkedGridTrace", 0) == 1;
         linked_trace_offers = 0;
