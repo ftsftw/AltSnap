@@ -2,7 +2,14 @@
    Private hooks.c adapter. Deliberately independent of drag and mouse queues. */
 #include "auto_tile_grid.c"
 
+/* One invocation only; never a persisted/window-name/process allowlist. */
 typedef struct {
+    HWND hwnd, owner;
+    DWORD pid, tid, owner_tid;
+} ATGSelectedOwned;
+
+typedef struct {
+    const ATGSelectedOwned *selected;
     HMONITOR monitor;
     MONITORINFO mi;
     ATGWindow windows[4];
@@ -177,6 +184,86 @@ static int AutoTileBlacklisted(HWND hwnd, const blacklist_t *list, const TCHAR *
     return blacklisted_from_names(list, exe, title, classname);
 }
 
+/* Reject ambiguous extra surfaces, even if the normal eligibility chain would
+   skip them. This deliberately includes visible tool/disabled/modeless windows
+   of the selected process. No dialog-class or Alt-Tab inference is sufficient. */
+static BOOL CALLBACK AutoTileSelectedOtherWindow(HWND hwnd, LPARAM lp)
+{
+    const ATGSelectedOwned *selected = (const ATGSelectedOwned *)lp;
+    DWORD pid = 0;
+    if (hwnd == selected->hwnd || hwnd == selected->owner || !IsWindowVisible(hwnd))
+        return TRUE;
+    return GetWindowThreadProcessId(hwnd, &pid) && pid && pid != selected->pid;
+}
+
+/* A restrictive guard for an explicitly chosen surface, NOT a main/dialog
+   classifier. Revalidate both identities/link and foreground around the reads.
+   Same-process/thread handle reuse and changes between calls remain possible. */
+static int AutoTileSelectedOwnedValid(const ATGSelectedOwned *selected)
+{
+    DWORD pid = 0, owner_pid = 0, tid, owner_tid, saved_error;
+    LONG_PTR style, exstyle, owner_style, owner_style_after, owner_exstyle;
+    TCHAR classname[64];
+    int ok = 0, class_length;
+    saved_error = GetLastError();
+    if (GetForegroundWindow() != selected->hwnd
+        || !IsWindow(selected->hwnd) || !IsWindow(selected->owner)
+        || selected->hwnd == selected->owner || !selected->pid
+        || !selected->tid || !selected->owner_tid) goto done;
+    tid = GetWindowThreadProcessId(selected->hwnd, &pid);
+    owner_tid = GetWindowThreadProcessId(selected->owner, &owner_pid);
+    if (tid != selected->tid || pid != selected->pid
+        || owner_tid != selected->owner_tid || owner_pid != selected->pid
+        || GetWindow(selected->hwnd, GW_OWNER) != selected->owner) goto done;
+    style = GetWindowLongPtr(selected->hwnd, GWL_STYLE);
+    exstyle = GetWindowLongPtr(selected->hwnd, GWL_EXSTYLE);
+    SetLastError(0);
+    owner_style = GetWindowLongPtr(selected->owner, GWL_STYLE);
+    if (!owner_style && GetLastError()) goto done;
+    SetLastError(0);
+    owner_exstyle = GetWindowLongPtr(selected->owner, GWL_EXSTYLE);
+    if ((!owner_exstyle && GetLastError())
+        || (style & (WS_CHILD|WS_POPUP))
+        || (style & (WS_CAPTION|WS_THICKFRAME)) != (WS_CAPTION|WS_THICKFRAME)
+        || !(exstyle & WS_EX_APPWINDOW)
+        || (exstyle & (WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_DLGMODALFRAME))
+        || (owner_style & WS_CHILD) || !(owner_exstyle & WS_EX_TOOLWINDOW)
+        || (owner_exstyle & (WS_EX_APPWINDOW|WS_EX_NOACTIVATE|WS_EX_DLGMODALFRAME))
+        || !IsWindowVisible(selected->hwnd) || !IsWindowVisible(selected->owner)
+        || !IsWindowEnabled(selected->hwnd) || !IsWindowEnabled(selected->owner)) goto done;
+    /* A standard dialog is always refused; a nonstandard class is not proof. */
+    class_length = GetClassName(selected->hwnd, classname, ARR_SZ(classname));
+    if (class_length <= 0 || class_length >= (int)ARR_SZ(classname)-1
+        || !lstrcmpi(classname, TEXT("#32770"))
+        || GetAncestor(selected->hwnd, GA_ROOT) != selected->hwnd
+        || GetAncestor(selected->hwnd, GA_ROOTOWNER) != selected->hwnd
+        || GetLastActivePopup(selected->hwnd) != selected->hwnd
+        || !EnumWindows(AutoTileSelectedOtherWindow, (LPARAM)selected)) goto done;
+    SetLastError(0);
+    owner_style_after = GetWindowLongPtr(selected->owner, GWL_STYLE);
+    if (!owner_style_after && GetLastError()) goto done;
+    pid = owner_pid = 0;
+    ok = GetForegroundWindow() == selected->hwnd
+        && IsWindow(selected->hwnd) && IsWindow(selected->owner)
+        && GetWindowThreadProcessId(selected->hwnd, &pid) == selected->tid
+        && pid == selected->pid
+        && GetWindowThreadProcessId(selected->owner, &owner_pid) == selected->owner_tid
+        && owner_pid == selected->pid
+        && GetWindow(selected->hwnd, GW_OWNER) == selected->owner
+        && IsWindowVisible(selected->hwnd) && IsWindowVisible(selected->owner)
+        && IsWindowEnabled(selected->hwnd) && IsWindowEnabled(selected->owner)
+        && GetWindowLongPtr(selected->hwnd, GWL_STYLE) == style
+        && GetWindowLongPtr(selected->hwnd, GWL_EXSTYLE) == exstyle
+        && owner_style_after == owner_style
+        && GetWindowLongPtr(selected->owner, GWL_EXSTYLE) == owner_exstyle
+        && GetAncestor(selected->hwnd, GA_ROOT) == selected->hwnd
+        && GetAncestor(selected->hwnd, GA_ROOTOWNER) == selected->hwnd
+        && GetLastActivePopup(selected->hwnd) == selected->hwnd;
+done:
+    SetLastError(saved_error);
+    return ok;
+}
+
 static int AutoTileEligible(HWND hwnd, const ATGSnapshot *s, unsigned *quiet)
 {
     DWORD pid;
@@ -198,7 +285,11 @@ static int AutoTileEligible(HWND hwnd, const ATGSnapshot *s, unsigned *quiet)
         return AutoTileSkip("skip-maximized-no-caption");
     if (exstyle & WS_EX_TOOLWINDOW) return AutoTileSkip("skip-toolwindow");
     if (exstyle & WS_EX_NOACTIVATE) return AutoTileSkip("skip-noactivate");
-    if ((owner = GetWindow(hwnd, GW_OWNER))) {
+    owner = GetWindow(hwnd, GW_OWNER);
+    if (s->selected && hwnd == s->selected->hwnd) {
+        if (!owner || owner != s->selected->owner || !AutoTileSelectedOwnedValid(s->selected))
+            return AutoTileSkip("selected-owner-refused");
+    } else if (owner) {
         if (auto_tile_trace) AutoTileOwnerTrace(hwnd, owner, pid, style, exstyle);
         return AutoTileSkip("skip-owner");
     }
@@ -287,13 +378,14 @@ static BOOL CALLBACK EnumAutoTileGrid(HWND hwnd, LPARAM lp)
     return TRUE;
 }
 
-static int AutoTileCapture(HMONITOR monitor, ATGSnapshot *s)
+static int AutoTileCapture(HMONITOR monitor, ATGSnapshot *s, const ATGSelectedOwned *selected)
 {
     UINT dx, dy;
     int enumerated;
     unsigned i;
     ATGCapture capture;
     mem00(s, sizeof *s);
+    s->selected = selected;
     s->monitor = monitor;
     s->mi.cbSize = sizeof s->mi;
     if (!GetMonitorInfo(monitor, &s->mi)
@@ -310,6 +402,13 @@ static int AutoTileCapture(HMONITOR monitor, ATGSnapshot *s)
         for (i = 0; i < ARR_SZ(capture.quiet); ++i)
             if (capture.quiet[i]) AutoTileTrace(auto_tile_quiet_reasons[i], capture.quiet[i]);
         AutoTileTrace("scan-candidates", s->count);
+    }
+    if (selected) {
+        for (i = 0; i < s->count && s->hwnd[i] != selected->hwnd; ++i) { }
+        if (i == s->count) {
+            AutoTileTrace("selected-not-captured", 0);
+            return 0;
+        }
     }
     return enumerated && !s->failed && s->count;
 }
@@ -456,7 +555,7 @@ static void AutoTileRollback(const ATGSnapshot *before, const ATGSnapshot *obser
     }
 }
 
-static void AutoTileGrid(POINT cursor)
+static void AutoTileGridRun(POINT cursor, const ATGSelectedOwned *selected)
 {
     static int busy;
     ATGSnapshot before, live, check;
@@ -469,8 +568,8 @@ static void AutoTileGrid(POINT cursor)
     HMONITOR monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONULL);
     if (busy || !monitor || !AutoTileIdle()) { AutoTileTrace("busy-or-no-monitor", 0); return; }
     busy = 1;
-    if (!AutoTileCapture(monitor, &before)) { AutoTileTrace("capture", 0); goto done; }
-    if (!AutoTileCapture(monitor, &check) || !AutoTileUnchanged(&before, &check)
+    if (!AutoTileCapture(monitor, &before, selected)) { AutoTileTrace("capture", 0); goto done; }
+    if (!AutoTileCapture(monitor, &check, selected) || !AutoTileUnchanged(&before, &check)
         || !AutoTileBaselines(&before, generation)) {
         AutoTileTrace("preflight-changed", before.count); goto done;
     }
@@ -493,7 +592,7 @@ static void AutoTileGrid(POINT cursor)
     }
     /* Re-read normal frame insets, DPI and limits, not maximized insets. Timed
        min/max callbacks can change any participant; validate the witnesses too. */
-    if (restore_mask && (!AutoTileCapture(monitor, &check) || check.count != before.count
+    if (restore_mask && (!AutoTileCapture(monitor, &check, selected) || check.count != before.count
         || !AutoTileBaselines(&live, generation))) {
         AutoTileTrace("normalized-capture-changed", before.count); goto rollback;
     }
@@ -514,7 +613,7 @@ static void AutoTileGrid(POINT cursor)
     }
     if (restore_mask) {
         ATGSnapshot stable;
-        if (!AutoTileCapture(monitor, &stable) || !AutoTileUnchanged(&check, &stable)
+        if (!AutoTileCapture(monitor, &stable, selected) || !AutoTileUnchanged(&check, &stable)
             || !AutoTileBaselines(&live, generation)) {
             AutoTileTrace("normalized-preflight-changed", before.count); goto rollback;
         }
@@ -530,6 +629,9 @@ static void AutoTileGrid(POINT cursor)
         AutoTileTrace("unchanged", before.count);
         if (!restore_mask) goto done;
         goto success;
+    }
+    if (selected && !AutoTileBaselines(&live, generation)) {
+        AutoTileTrace("selected-preflight-changed", 0); goto rollback;
     }
     batch = BeginDeferWindowPos(changed);
     for (i = 0; batch && i < before.count; ++i) {
@@ -568,4 +670,32 @@ rollback:
     AutoTileRollback(&before, &live, restore_mask, generation);
 done:
     busy = 0;
+}
+
+static void AutoTileGrid(POINT cursor)
+{
+    AutoTileGridRun(cursor, NULL);
+}
+
+/* Separate, opt-in keyboard action: focus the intended main surface yourself.
+   Never promote a child/popup/root-owner or remember this HWND after return. */
+static void AutoTileGridSelected(POINT cursor)
+{
+    ATGSelectedOwned selected;
+    DWORD owner_pid = 0;
+    mem00(&selected, sizeof selected);
+    if (!AutoTileIdle()) { AutoTileTrace("busy-or-no-monitor", 0); return; }
+    selected.hwnd = GetForegroundWindow();
+    if (!selected.hwnd || !IsWindow(selected.hwnd)) goto refused;
+    selected.owner = GetWindow(selected.hwnd, GW_OWNER);
+    if (!selected.owner || !IsWindow(selected.owner)) goto refused;
+    selected.tid = GetWindowThreadProcessId(selected.hwnd, &selected.pid);
+    selected.owner_tid = GetWindowThreadProcessId(selected.owner, &owner_pid);
+    if (!selected.pid || selected.pid == GetCurrentProcessId() || owner_pid != selected.pid
+        || !AutoTileSelectedOwnedValid(&selected)) goto refused;
+    AutoTileTrace("selected-owner-once", 1);
+    AutoTileGridRun(cursor, &selected);
+    return;
+refused:
+    AutoTileTrace("selected-owner-refused", 1);
 }

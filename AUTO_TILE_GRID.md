@@ -54,7 +54,8 @@ Windows privileges. Portable MobaXterm returns `skip-owner` both normal and
 maximized. With it open, three ordinary windows tile in 1+2 while MobaXterm stays
 in place. Its earlier Linked Grid Resize minimum-size/guarded rollback test also
 passed; that does not establish AutoTileGrid eligibility. The owner diagnostics
-below are new and have not yet been tested against the real MobaXterm GUI.
+below have now been exercised against the real MobaXterm GUI; the new explicit
+selection command described later has **not** been GUI-tested.
 
 Set `AutoTileTrace=1` in the existing `[General]` section and restart AltSnap.
 Capture Win32 debugger output with DebugView, filter **AltSnap.ATG**, clear the
@@ -73,8 +74,9 @@ Disable `AutoTileTrace` afterwards. Do not elevate AltSnap to force participatio
 No trace files, window identifiers, titles, executable names, paths, PID/TID,
 geometry or content are emitted. Only fixed codes, categorical owner observations,
 counts/participant indices and existing numeric Win32 process-query errors are
-written. No extra diagnostic window/process queries or GetLastError/SetLastError
-calls run with `AutoTileTrace=0`.
+written. In ordinary AutoTileGrid, no extra diagnostic window/process queries
+or GetLastError/SetLastError calls run with `AutoTileTrace=0`. The explicit
+selection action always performs its safety reads, independently of tracing.
 
 Each capture is bracketed by `scan-begin count=0` and `scan-candidates count=N`.
 Monitor/invisible/cloaked/zero-size/minimized exclusions are aggregated into at
@@ -106,7 +108,9 @@ constituent predicates to classify the rejection. Those diagnostic observations
 can race with window changes and never change eligibility; a mismatch should be
 retested with the window stable. Ordinary/style/owner checks emit the actual
 first short-circuited reason. One record need not reveal every possible blocker.
-No WS_THICKFRAME, child, owner, fullscreen or other safety check was relaxed.
+Ordinary AutoTileGrid keeps every WS_THICKFRAME, child, owner, fullscreen and
+other safety gate. The separate experimental selection action below grants a
+one-invocation owner exception only to its explicitly chosen window.
 
 Process detail uses `reason=... error=N` (not `count`):
 
@@ -187,7 +191,7 @@ the host is reread because a failed API may have damaged the shared output; if
 the host cannot be read again, the whole lookup fails rather than using child
 bytes as a host name.
 
-Windows GUI validation still needed: test VS Code normal/maximized alone and
+Additional Windows GUI validation: test VS Code normal/maximized alone and
 in 1–4-window mixes at equal privileges; repeat with Processes/Windows/Bottommost
 blacklists (including executable-qualified entries and whitelist mode). Confirm
 `process-limited-used` followed by the expected layout or blacklist refusal, and
@@ -198,7 +202,8 @@ real VS Code process permits the limited right or passes later DPI/size gates.
 
 ## MobaXterm: owner analysis, no eligibility change
 
-`skip-owner` retains its unconditional refusal. Only when `AutoTileTrace=1`,
+In ordinary `AutoTileGrid`, `skip-owner` retains its unconditional refusal.
+Only when `AutoTileTrace=1`,
 an owner rejection is preceded by at most four contiguous diagnostic lines,
 all matching the existing **AltSnap.ATG** DebugView filter. There are no handles,
 PID/TID, executable names, titles, paths, class names, geometry or raw style/error
@@ -242,8 +247,10 @@ non-null ancestor different from both candidate and immediate owner (a deeper
 chain). Last-active popup is activation history, not a complete dialog list or a
 modality test. These APIs send no diagnostic messages, do not activate/resize or
 otherwise modify windows, and require no background process, worker or elevation.
-With tracing off the original single GW_OWNER eligibility read remains, and none
-of these extra queries, formatting, error-state operations or output runs.
+In ordinary AutoTileGrid with tracing off, the original single GW_OWNER
+eligibility read remains, and none of these extra diagnostic queries, formatting,
+error-state operations or output runs. The explicit selection action performs
+its safety checks regardless of tracing; tracing only controls its output.
 Earlier exclusions such as tool/no-activate windows still short-circuit before
 GW_OWNER; they do not produce an owner block.
 
@@ -263,16 +270,26 @@ for additional properties. Do not use these observations as an eligibility rule.
 | Caption, thick frame, maximized state | Resizable dialogs can share all of these |
 | GA_ROOT equals self | Top-level parentage; ownership is a separate relation |
 | GA_ROOTOWNER / last-active popup relations | Ownership/activation history, not a reliable dialog classifier |
-| Modal-frame style or standard dialog class absent | Custom dialogs need neither; collecting class names is unnecessary here |
+| Modal-frame style or standard dialog class absent | Custom dialogs need neither; class rejection alone is insufficient |
 
-A future exception would require stable joint evidence across normal/maximized
-main windows and modal/modeless/custom dialogs, including disabled owners and
-activation changes. These observations may reveal an auxiliary hidden-owner
-pattern worth investigating; they cannot establish a general safe classifier.
-No classifier, MobaXterm/EXE allowlist or Alt-Tab exception is implemented.
-hooks.c's IsAltTabAble is a presentation selector, too permissive for automatic
-movement. Process lookup (including the VS Code fallback), all blacklists,
-Linked Grid Resize, min/max checks and recovery rules are unchanged.
+The latest real Windows 10 trace is consistent across normal, button-maximized
+and mouse-resized portable MobaXterm: stable same-process visible/enabled TOOLWINDOW
+owner, no owner APPWINDOW/NOACTIVATE, non-POPUP enabled APPWINDOW candidate, and
+root/rootowner/lastpopup all self. With a dialog open, both candidate and owner
+become disabled; a `skip-child` record is also present. That child record cannot
+identify which window produced it without a window ID, and no such ID is logged.
+These are useful observations of this version, not a proof that the joint profile
+uniquely identifies a main window. A modeless/custom dialog can share the profile.
+In particular, GA_ROOTOWNER=self despite a non-null GW_OWNER is an observed API
+result, not grounds to discard the owner link.
+
+No automatic owned-main classifier or executable allowlist is implemented.
+hooks.c's IsAltTabAble remains a presentation selector, too permissive for
+automatic movement. Instead the separate action below requires an explicit
+per-invocation user choice and uses the observed joint profile only as a narrow
+safety guard. Process lookup (including the VS Code fallback), all blacklists,
+Linked Grid Resize, layout planning, min/max checks and recovery algorithms are
+unchanged.
 
 Portable packaging **could** indirectly affect topology if its launcher or UI
 initialization creates a hidden helper owner or a different process relationship.
@@ -282,36 +299,138 @@ mode causes MobaXterm's owner. A controlled real Windows comparison of the same
 MobaXterm version/configuration in portable and installed modes, normal/maximized
 and with dialogs, is needed; no portable-specific cause or support is claimed.
 
-### Short Windows 10 portable MobaXterm check
+### Experimental explicit selection: AutoTileGridSelected
 
-1. Use the portable ZIP for this commit as described above, at ordinary privileges.
-   Set `[KBShortcuts] AutoTileGrid=839` and `[General] AutoTileTrace=1` in the test
-   INI; restart AltSnap. In DebugView filter `AltSnap.ATG`. Keep app/version,
-   privilege, scaling, monitor and the test case in separate manual notes.
-2. Minimize other eligible apps. Keep portable MobaXterm **normal**, clear DebugView,
-   put the cursor on its monitor and press Ctrl+Alt+G once. Retain the complete
-   scan/final output including the owner block and `skip-owner`; verify no movement.
-3. **Maximize** MobaXterm, clear capture and repeat once. Verify it stays maximized
-   in place. Compare categorical owner observations with the normal case.
-4. Return it to normal, open a modal MobaXterm settings/confirmation dialog, clear
-   capture and invoke once. Record whether the main surface is disabled and how
-   the owner/popup block differs. Verify neither main surface nor dialog moves.
-   Close the dialog and repeat with a modeless dialog if the tested version has
-   one. A dialog may hit an earlier gate and have no owner block; record that
-   limit instead of treating a missing block as evidence of no dialog.
-5. Close dialogs. On that monitor open exactly three ordinary windows (for example
-   Chrome, VS Code without elevation and Windows Terminal), plus MobaXterm. Clear
-   capture and invoke once with MobaXterm normal, then again maximized. Expect
-   `scan-candidates count=3`, a final successful three-window **1+2** layout, and
-   MobaXterm still excluded/in place. The three windows use the whole work area:
-   **they may overlap/cover MobaXterm**. Exclusion does not reserve space for it.
-6. Repeat the mixed check with `AutoTileTrace=0` after restarting AltSnap. Expect
-   the same exclusions/layout and no `AltSnap.ATG` output; leave tracing disabled.
+Use a separate test copy and opt in by assigning this new shortcut in its existing
+INI sections, then restarting AltSnap:
 
-Retain full filtered output, including repeated captures and terminal refusal
-codes, rather than just the owner block. No new Windows GUI run was performed in
-the Linux environment. Until that run, the new diagnostics and any distinction
-between owned main surfaces and dialogs remain unverified on actual MobaXterm.
+```ini
+[KBShortcuts]
+AutoTileGrid=839
+AutoTileGridSelected=1863
+
+[General]
+AutoTileTrace=1
+```
+
+839 is Ctrl+Alt+G; 1863 is **Ctrl+Alt+Shift+G**. The shipped INI assigns neither
+command. An absent or zero AutoTileGridSelected entry registers no shortcut.
+Remove/zero that entry and restart to disable the experimental shortcut; leave
+AutoTileTrace=0 after collecting results. No persistent permission, window property,
+process allowlist or EXE-specific setting is stored. Explicit command-line action
+invocation also counts as selecting the current foreground window, not a saved
+selection. The ordinary shortcut does not inherit any permission from this action.
+
+**Before each invocation, close the application's dialogs and explicitly focus
+its intended main surface yourself.** The action selects exactly GetForegroundWindow
+once, without promoting a child, owner, or popup. `UsePtWindow` does not change
+selection. The cursor still chooses the monitor; the selected surface must be on
+that monitor. The action requires an owned window; focusing an ordinary unowned
+app is a refusal, not a fallback to ordinary tiling.
+
+The selected candidate must pass all existing AutoTileGrid eligibility, process
+identity, Processes/Windows/Bottommost blacklist, DWM, DPI, native frame, placement,
+min/max, stable-capture and 1–4-participant checks. In addition:
+
+- Pin candidate HWND, nonzero PID/TID and owner HWND/TID for this invocation;
+  require the owner to have the same nonzero PID. Recheck both identities and the
+  exact owner link around observation and at subsequent eligibility/witness checks.
+- Require full caption plus thick frame; APPWINDOW; no CHILD, POPUP, TOOLWINDOW,
+  NOACTIVATE or DLGMODALFRAME on the candidate. A failed/truncated class read or
+  standard `#32770` dialog class refuses. Class text is never logged.
+- Require the distinct owner to be visible, enabled, non-child TOOLWINDOW, without
+  APPWINDOW, NOACTIVATE or DLGMODALFRAME. Unknown required owner style reads refuse.
+  Candidate must also be visible/enabled. Root/rootowner/last-active-popup must
+  each be exactly the selected candidate, matching the supplied trace.
+- Require the selected candidate to remain foreground while checking. A read-only
+  EnumWindows scan refuses **any other visible top-level surface in that process**
+  except the pinned helper owner, including tool, disabled, modal/modeless and
+  otherwise ineligible windows. An unknown visible window PID or enumeration
+  failure also refuses. This is deliberately stricter than ordinary enumeration.
+- Recheck identities, link, enabled/visible states, styles and root/popup relations
+  after the scan. Repeat these guards during capture, identity/baseline checks,
+  after normalization and immediately before creating the positioning batch.
+
+Only this one HWND receives the owner exception. All other owned windows keep
+`skip-owner`. If the selection fails any ordinary gate or is missing from a
+capture, the whole selected command refuses; it does not silently tile only the
+remaining three apps. Five eligible participants still refuse before any
+normalization. Safety reads run even with AutoTileTrace=0. There are no new
+messages, workers, elevation requests or process-query access rights.
+
+| New fixed event | Meaning |
+| --- | --- |
+| `selected-owner-once count=1` | Initial explicit selection/owner guard passed; not yet an eligibility/layout success |
+| `selected-owner-refused count=1` | Selected window/owner guard failed, including selection of a dialog/ordinary unowned app |
+| `selected-not-captured count=0` | The selected HWND did not pass capture; no partial-set fallback |
+| `selected-preflight-changed count=0` | Last baseline before batch creation changed; enter existing guarded recovery |
+
+Existing scan/final/process/rollback events remain authoritative. New events use
+only fixed codes and counts, with the same AltSnap.ATG DebugView filter.
+
+**Limits:** explicit user intent replaces the impossible main/dialog inference;
+the profile does not become a proven classifier. A custom dialog that perfectly
+mimics this profile with no other visible same-process top-level surface can still
+be explicitly misselected. Child-embedded/custom dialogs are not exhaustively
+identified; other-process UI and invisible surfaces are not a complete dialog
+model. Close dialogs yourself and do not select a dialog. Visible auxiliary
+windows or another main window of the same process may cause a conservative
+refusal. The observed profile may differ between MobaXterm releases/modes.
+
+Checks are sequential, not atomic: same-process/thread HWND reuse, a link changing
+away and back, or a new dialog/focus/style change after the last observation can
+escape detection. Restricting authorization to one invocation avoids stale saved
+handles but does not eliminate these Win32 races. The existing synchronous
+min/max and placement calls can run application code. Process/UIPI restrictions
+still apply; do not elevate AltSnap to force a pass. The existing rollback witness
+also includes selection eligibility: if identity/owner/foreground/topology changes
+after movement, it may refuse to restore the selected window while restoring safe
+peers. Partial recovery and maximize activation remain the documented limitations;
+no unsafe unconditional restoration was added.
+
+### Exact Windows 10 check for the experimental command
+
+1. Download the portable artifact for this commit, unpack both ZIP layers and
+   start only that AltSnap copy without elevation. Use the INI above. Filter
+   DebugView by `AltSnap.ATG`, clear it before each invocation and keep complete
+   output through the final event. Record version/scaling/monitor/privilege and
+   case labels separately, without adding identifiers to the trace.
+2. Control: portable MobaXterm + exactly three ordinary apps (e.g. Chrome, VS Code
+   without elevation and Windows Terminal), all on the cursor's monitor. Press
+   **Ctrl+Alt+G**. Expect MobaXterm `skip-owner`, three candidates and 1+2 success.
+   Those three windows may cover MobaXterm: exclusion reserves no work-area space.
+3. Close every MobaXterm dialog, explicitly focus its main surface and keep the
+   cursor on that monitor. Press **Ctrl+Alt+Shift+G**. Expect
+   `selected-owner-once`, four captured candidates and `success count=4` in 2×2.
+   Repeat to check the fixed point (`unchanged count=4` is valid on a repeat).
+   If any safety gate refuses, retain its full output; do not weaken the guard.
+4. Repeat step 3 with MobaXterm maximized by its button, then with its main window
+   resized by mouse. Also test it alone (one-cell layout). No manual normalization
+   is required. A successful normalization may log `normalized` before tiling.
+5. Open a modal dialog, leave it focused and invoke the selected command: expect
+   refusal and no window movement. If the disabled main surface can be foreground,
+   test that too: it must refuse. Repeat with a modeless dialog, trying both its
+   surface and the main surface while the dialog remains visible; neither the
+   dialog nor any ordinary peers should move. A child-style selected dialog must
+   not be promoted to its parent. An indistinguishable child-embedded custom UI
+   remains a documented limit, not evidence of reliable dialog classification.
+6. Close dialogs. Blacklist the selected app via Processes, Windows and Bottommost
+   in turn: the selected command must move nothing. Remove each test blacklist
+   before continuing. Add a fourth ordinary app (five total eligible participants)
+   and invoke: expect `too-many`, with no movement or normalization.
+7. Repeat the successful four-window case with AutoTileTrace=0 after restart;
+   expect the same behavior and no AltSnap.ATG output. Press the ordinary shortcut
+   afterwards: MobaXterm must again be excluded. Removing the experimental shortcut
+   must leave all ordinary behavior unchanged.
+8. With dialogs closed, repeat the prior successful Linked Grid Resize/minimum-size
+   and guarded-rollback test on a deliberately prepared layout. The Linked Grid
+   implementation is unchanged. Record any selected-command application size
+   correction, refusal, partial recovery, focus or Z-order change separately.
+
+The new action has passed deterministic stubs and cross-build validation, not a
+real MobaXterm GUI run. The supplied diagnostics establish the observed topology
+and ordinary-command exclusion only. **Experimental MobaXterm AutoTileGrid support
+is not confirmed until the new action passes real Windows tests.**
 
 Sources: Microsoft [GetWindow](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindow),
 [window styles](https://learn.microsoft.com/en-us/windows/win32/winmsg/window-styles),
@@ -333,7 +452,8 @@ AutoTileGrid=839
 
 839 is Ctrl+Alt+G (G=71, Alt=256, Control=512). An absent entry or
 `AutoTileGrid=0` leaves the command disabled, including in the shipped default
-configuration. No GUI setting is added. `UsePtWindow` does not affect this
+configuration. The experimental selection shortcut is separate and disabled by default.
+No GUI setting is added. `UsePtWindow` does not affect this
 monitor-wide command: the cursor position at invocation selects the monitor.
 There is no foreground-window initialization. Forward normalization requests
 no activation, and the final positioning batch requests no activation or Z-order
@@ -364,7 +484,7 @@ an infeasible arrangement is refused instead of resized into overlapping cells.
 Only visible, non-cloaked, enabled, resizable top-level windows on the selected
 monitor are considered. Existing snap visibility and process/window blacklist
 helpers are reused. Desktop/shell/taskbars, AltSnap's process and AltSnap.exe,
-tool/no-activate windows, owned windows/dialogs, minimized, fullscreen,
+tool/no-activate windows, owned windows/dialogs in the ordinary command, minimized, fullscreen,
 rolled, MoveOnOff-disabled and Bottommost-blacklisted windows are excluded.
 WS_THICKFRAME is required; ResizeAll/AlwaysResize cannot force participation.
 Process identity must be readable. Missing DWM data remains excluded.
@@ -482,7 +602,12 @@ combinations with tracing both off and on (4,096 cases), plus link races,
 root/popup relations, unknown styles and mixed three-window layouts, blacklist,
 infeasible-plan/five-participant refusals and rollback. An exact fixed token
 vocabulary checks owner log privacy. Trace-off tests count extra queries and
-error-state operations. ASan/UBSan and MinGW x64 test compilation are supported
+error-state operations. Explicit-selection tests additionally cover every 1–4-window
+normal/maximized combination, no retained authorization, modal/modeless/custom and
+child dialog refusals, disabled/unknown owners, failed class/process reads,
+blacklists, five participants, min/max/DPI refusal, owner/identity/foreground/style
+races, ordinary recovery and guarded partial recovery after authorization loss.
+ASan/UBSan and MinGW x64 test compilation are supported
 by tests/Makefile.
 
 Full Windows x64 application build (no Windows GUI execution):
@@ -493,7 +618,7 @@ make -f MakefileX64 -j2 \
 ```
 
 The user-reported Windows 10 results above are established observations; the
-new owner diagnostics and remaining GUI scenarios still require real testing.
+new explicit selection action and remaining GUI scenarios still require real testing.
 Portable tests do not exercise enumeration, UIPI, DWM, DPI message marshalling,
 DeferWindowPos or recovery against real applications. On Windows, verify:
 

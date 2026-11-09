@@ -43,6 +43,7 @@ typedef struct { UINT length, flags, showCmd; POINT ptMinPosition, ptMaxPosition
 #define WS_EX_NOACTIVATE 8
 #define WS_POPUP 64
 #define WS_EX_APPWINDOW 128
+#define WS_EX_DLGMODALFRAME 256
 #define PROCESS_QUERY_INFORMATION 1024u
 #define PROCESS_VM_READ 16u
 #define IPTR ((void (*)(void))1)
@@ -83,6 +84,12 @@ static DWORD last_error;
 static unsigned owner_queries, owner_link_queries;
 static int owner_exists, owned_exists, owner_race, owner_style_fail;
 static HWND relation_root, relation_rootowner, relation_popup;
+static HWND foreground;
+static unsigned selected_scans;
+static int selected_scan_fail, selected_effect, selected_effect_at;
+static int class_query_fail, thread_changed, owner_thread_changed;
+static int selected_batch_effect;
+static int selected_dialog_during_limits;
 static char trace_log[16384];
 static size_t trace_used;
 static int wsprintfA(char *buf, const char *fmt, ...)
@@ -118,16 +125,20 @@ static BOOL EqualRect(const RECT *a, const RECT *b) { return !memcmp(a,b,sizeof 
 static void SetRect(RECT *r, LONG l, LONG t, LONG rr, LONG b) { *r=(RECT){l,t,rr,b}; }
 static LONG MovementGeneration(void) { return generation; }
 static LONG_PTR GetWindowLongPtr(HWND w, int which) {
-    if (w==102 && owner_style_fail) { ++owner_queries; last_error=5; return 0; }
+    if (w==102 && owner_style_fail && (owner_style_fail==2 || which==GWL_EXSTYLE))
+        { ++owner_queries; last_error=5; return 0; }
     return which ? win(w)->exstyle : win(w)->style;
 }
 static DWORD GetWindowThreadProcessId(HWND w, DWORD *pid)
-{ process_window=w; *pid=win(w)->pid; return win(w)->identity_fail ? 0 : 10; }
+{ process_window=w; *pid=win(w)->pid; return win(w)->identity_fail ? 0 :
+    w==102 ? (DWORD)(10+owner_thread_changed) : (DWORD)(10+thread_changed); }
 static DWORD GetCurrentProcessId(void) { return 999; }
 static HWND GetDesktopWindow(void) { return fake[0].shell_kind==1 ? 1 : 100; }
 static HWND GetShellWindow(void) { return fake[0].shell_kind==2 ? 1 : 101; }
+static HWND GetForegroundWindow(void) { return foreground; }
 static HWND GetWindow(HWND w, int which) {
     assert(which==GW_OWNER); ++owner_link_queries;
+    if (win(w)->owned==3) return w;
     return win(w)->owned==2 ? 103 : win(w)->owned ? 102 : 0;
 }
 static BOOL IsWindow(HWND w) {
@@ -177,7 +188,12 @@ static int blacklisted(HWND w, const blacklist_t *list)
 static int GetWindowText(HWND w, TCHAR *buf, size_t n)
 { int k=snprintf(buf,n,"window%u",(unsigned)w); assert(k>0 && (size_t)k<n); return k; }
 static int GetClassName(HWND w, TCHAR *buf, size_t n)
-{ (void)w; assert(n>5); strcpy(buf,"Class"); return 5; }
+{
+    const char *name=win(w)->class_kind==5 ? "#32770" : "Class";
+    assert(n>strlen(name));
+    if (class_query_fail) return 0;
+    strcpy(buf,name); return (int)strlen(name);
+}
 static int blacklisted_from_names(const blacklist_t *list, const TCHAR *exe,
                                  const TCHAR *title, const TCHAR *classname)
 {
@@ -251,6 +267,7 @@ static int GetMinMaxInfoF(HWND w, POINT *lo, POINT *hi, int ignore)
     assert(!ignore); *lo=win(w)->lo; *hi=win(w)->hi;
     if (change_preflight && captures==2 && w==count) fake[0].native.left++;
     if (change_placement_preflight && captures==2 && w==count) fake[0].placement.rcNormalPosition.left++;
+    if (selected_dialog_during_limits && captures==1 && w==count) fake[count-1].pid=1;
     return !win(w)->min_fail;
 }
 static int GetMonitorInfo(HMONITOR m, MONITORINFO *mi)
@@ -264,6 +281,32 @@ static int EnumDesktopWindows(void *desktop, BOOL (*callback)(HWND,LPARAM), LPAR
         HWND next=reverse_enum && captures%2==0 ? count+1-w : w;
         for (repeat=0;repeat<(w==1 ? enum_repeats : 1);++repeat)
             if (!callback(next,lp)) return 0;
+    }
+    return 1;
+}
+static BOOL EnumWindows(BOOL (*callback)(HWND,LPARAM), LPARAM lp)
+{
+    HWND w;
+    ++selected_scans;
+    if (selected_scan_fail) return 0;
+    for (w=1;w<=count;++w) if (!callback(w,lp)) return 0;
+    if ((int)selected_scans==selected_effect_at) {
+        if (selected_effect==1) fake[0].owned=2;
+        if (selected_effect==2) fake[0].owned=0;
+        if (selected_effect==3) owner_exists=0;
+        if (selected_effect==4) owned_exists=0;
+        if (selected_effect==5) fake_owner.pid++;
+        if (selected_effect==6) fake[0].pid++;
+        if (selected_effect==7) owner_thread_changed=1;
+        if (selected_effect==8) thread_changed=1;
+        if (selected_effect==9) foreground=0;
+        if (selected_effect==10) fake[0].enabled=0;
+        if (selected_effect==11) fake_owner.enabled=0;
+        if (selected_effect==12) fake[0].exstyle=0;
+        if (selected_effect==13) fake_owner.exstyle=0;
+        if (selected_effect==14) relation_popup=102;
+        if (selected_effect==15) relation_rootowner=102;
+        if (selected_effect==16) fake[0].style|=WS_POPUP;
     }
     return 1;
 }
@@ -292,6 +335,11 @@ static int EndDeferWindowPos(HDWP b)
     if (batch_effect==2) { fake[1].zoomed=1; fake[1].placement.showCmd=SW_SHOWMAXIMIZED; }
     if (batch_effect==3) fake[1].identity_fail=1;
     if (batch_effect==4) fake[1].dwm_fail=1;
+    if (selected_batch_effect==1) fake[0].owned=2;
+    if (selected_batch_effect==2) fake[0].pid++;
+    if (selected_batch_effect==3) fake_owner.enabled=0;
+    if (selected_batch_effect==4) foreground=0;
+    if (selected_batch_effect==5) relation_popup=102;
     if (cancel_batch) ++generation;
     if (start_drag) state.action.ac=1;
     return !fail_batch;
@@ -369,6 +417,11 @@ static void reset(unsigned n)
     owner_exists=owned_exists=1; owner_race=owner_style_fail=0;
     relation_root=relation_popup=1; relation_rootowner=102;
     mem00(&fake_owner,sizeof fake_owner); fake_owner.pid=1;
+    foreground=0; selected_scans=0;
+    selected_scan_fail=selected_effect=selected_effect_at=0;
+    class_query_fail=thread_changed=owner_thread_changed=0;
+    selected_batch_effect=0;
+    selected_dialog_during_limits=0;
     fail_normalize=fail_max_restore=normalize_effect=normalize_effect_at=0;
     placement_fail=change_placement_preflight=fail_begin=0;
     monitor_rect=(RECT){0,0,1200,1000}; work_rect=(RECT){0,0,1200,960};
@@ -827,10 +880,180 @@ static void owner_topology_trace(void)
         else owner_log_safe();
     }
 }
+static void selected_setup(unsigned n, unsigned trace)
+{
+    unsigned i;
+    reset(n); auto_tile_trace=(int)trace;
+    foreground=1; fake[0].owned=1; fake[0].exstyle=WS_EX_APPWINDOW;
+    fake_owner.style=WS_POPUP; fake_owner.exstyle=WS_EX_TOOLWINDOW;
+    fake_owner.visible=fake_owner.enabled=1;
+    relation_root=relation_rootowner=relation_popup=1;
+    for (i=1;i<n;++i) fake[i].pid=i+20;
+}
+static void invoke_selected(void) { AutoTileGridSelected((POINT){100,100}); }
+
+static void explicitly_selected_owned(void)
+{
+    unsigned trace, n, mask, i, kind, at;
+    for (trace=0;trace<=1;++trace) {
+        for (n=1;n<=4;++n) for (mask=0;mask<(1u<<n);++mask) {
+            selected_setup(n,trace);
+            for (i=0;i<n;++i) if (mask&(1u<<i)) maximize(i);
+            invoke_selected();
+            assert(positions==n && clears==n && !restores && !max_restores);
+            i=positions; invoke_selected(); assert(positions==i); /* Fixed point. */
+            assert(selected_scans);
+            if (trace) assert(strstr(trace_log,"reason=selected-owner-once count=1"));
+            else assert(!trace_lines);
+        }
+        /* Ordinary shortcut remains unchanged, with no sticky authorization. */
+        selected_setup(4,trace); invoke();
+        assert(positions==3 && !selected_scans && EqualRect(&fake[0].native,&fake[0].original));
+        selected_setup(4,trace); invoke_selected();
+        {
+            RECT selected_rect=fake[0].native;
+            unsigned scans=selected_scans;
+            invoke(); assert(EqualRect(&fake[0].native,&selected_rect) && selected_scans==scans);
+        }
+        /* Another owned window in another process never inherits permission. */
+        selected_setup(5,trace); fake[4].owned=1; fake[4].exstyle=WS_EX_APPWINDOW;
+        invoke_selected(); assert(positions==4 && clears==4 && EqualRect(&fake[4].native,&fake[4].original));
+        /* No fallback to tiling only the other windows when selection is unsafe. */
+        for (kind=0;kind<43;++kind) {
+            selected_setup(4,trace);
+            switch (kind) {
+            case 0: foreground=0; break;
+            case 1: fake[0].owned=0; break;
+            case 2: owner_exists=0; break;
+            case 3: owned_exists=0; break;
+            case 4: fake[0].enabled=0; break;
+            case 5: fake_owner.enabled=0; break;
+            case 6: fake_owner.visible=0; break;
+            case 7: fake[0].style|=WS_CHILD; break;
+            case 8: fake[0].style|=WS_POPUP; break;
+            case 9: fake[0].exstyle=0; break;
+            case 10: fake[0].exstyle|=WS_EX_TOOLWINDOW; break;
+            case 11: fake[0].exstyle|=WS_EX_NOACTIVATE; break;
+            case 12: fake[0].exstyle|=WS_EX_DLGMODALFRAME; break;
+            case 13: fake_owner.exstyle=0; break;
+            case 14: fake_owner.exstyle|=WS_EX_APPWINDOW; break;
+            case 15: fake_owner.exstyle|=WS_EX_NOACTIVATE; break;
+            case 16: fake_owner.style|=WS_CHILD; break;
+            case 17: fake_owner.pid=2; break;
+            case 18: fake_owner.identity_fail=1; break;
+            case 19: fake[0].identity_fail=1; break;
+            case 20: owner_style_fail=1; break;
+            case 21: relation_root=102; break;
+            case 22: relation_rootowner=102; break;
+            case 23: relation_popup=102; break;
+            case 24: fake[0].class_kind=5; break; /* Standard dialog, even APPWINDOW. */
+            case 25: class_query_fail=1; break;
+            case 26: selected_scan_fail=1; break;
+            case 27: fake[0].name_fail=1; break; /* No privilege/process bypass. */
+            case 28: fake[0].dpi=120; break;
+            case 29: fake[0].min_fail=1; break;
+            case 30: fake[0].lo.x=1800; break;
+            case 31: fake[0].monitor=2; break;
+            case 32: fake[0].visible=0; break;
+            case 33: fake[0].cloaked=1; break;
+            case 34: fake[0].iconic=1; break;
+            case 35: fake[0].pid=fake_owner.pid=999; break;
+            case 36: fake_owner.exstyle|=WS_EX_DLGMODALFRAME; break;
+            case 37: owner_style_fail=2; break;
+            case 38: fake[0].pid=fake_owner.pid=0; break;
+            case 39: fake_owner.pid=0; break;
+            case 40: fake[0].style=0; break;
+            case 41: fake[0].style=WS_THICKFRAME; break;
+            case 42: fake[0].owned=3; break;
+            }
+            invoke_selected(); unchanged(); assert(!positions && !normalizes && !clears);
+            if (!trace) assert(!trace_lines);
+        }
+        /* Modal/modeless/custom/tool/disabled extra top-level surfaces of the
+           selected process block the whole command, before ordinary filtering. */
+        for (kind=0;kind<5;++kind) {
+            selected_setup(4,trace); fake[1].pid=1;
+            if (kind==0) { fake[1].owned=1; fake[1].style|=WS_POPUP; }
+            if (kind==1) fake[1].exstyle=WS_EX_TOOLWINDOW;
+            if (kind==2) fake[1].enabled=0;
+            if (kind==3) fake[1].class_kind=5;
+            if (kind==4) { /* Explicitly choosing a look-alike modeless dialog. */
+                foreground=2; fake[1].owned=1; fake[1].exstyle=WS_EX_APPWINDOW;
+                relation_root=relation_rootowner=relation_popup=2;
+            }
+            invoke_selected(); unchanged(); assert(!positions && !normalizes);
+        }
+        selected_setup(2,trace); fake[1].pid=1; fake[1].visible=0;
+        invoke_selected(); assert(positions==1); /* Hidden auxiliary surface is not moved. */
+        selected_setup(2,trace); fake[1].identity_fail=1;
+        invoke_selected(); unchanged(); assert(!positions); /* Unknown visible identity fails closed. */
+        selected_setup(2,trace); fake[1].pid=0;
+        invoke_selected(); unchanged(); assert(!positions);
+        selected_setup(4,trace); selected_dialog_during_limits=1;
+        invoke_selected(); unchanged(); assert(!positions && !normalizes);
+        selected_setup(4,trace); owner_thread_changed=1;
+        invoke_selected(); assert(positions==4); /* Same process need not mean same thread. */
+        for (kind=1;kind<=3;++kind) {
+            selected_setup(4,trace); fake[0].blacklisted=(int)kind;
+            invoke_selected(); unchanged(); assert(!positions && !normalizes);
+            selected_setup(4,trace); fake[1].blacklisted=(int)kind;
+            invoke_selected(); assert(positions==3 && EqualRect(&fake[1].native,&fake[1].original));
+        }
+        selected_setup(5,trace); maximize(0); invoke_selected(); unchanged(); assert(!normalizes && !positions);
+        for (kind=0;kind<6;++kind) for (mask=0;mask<2;++mask) {
+            selected_setup(4,trace); if (mask) maximize(0);
+            if (kind==0) fake[0].behavior=1; /* +107 px correction by chosen surface. */
+            if (kind==1) fake[0].behavior=2;
+            if (kind==2) fail_batch=1;
+            if (kind==3) fail_defer=1;
+            if (kind==4) fail_begin=1;
+            if (kind==5) { maximize(0); normalize_effect_at=1; normalize_effect=5; }
+            invoke_selected(); unchanged(); assert(!clears);
+            if (fake[0].original_placement.showCmd==SW_SHOWMAXIMIZED) assert(max_restores==1);
+        }
+        /* Link/identity/topology/foreground races in initial validation, either
+           capture, and baseline checks all refuse before forward positioning. */
+        for (at=1;at<=4;++at) for (kind=1;kind<=16;++kind) {
+            selected_setup(4,trace); selected_effect_at=(int)at; selected_effect=(int)kind;
+            invoke_selected(); unchanged(); assert(!positions && !normalizes && !clears);
+        }
+        /* Once identity/authorization changes after the batch, do not force the
+           selected window back. Existing guarded recovery can restore peers. */
+        for (kind=1;kind<=5;++kind) {
+            selected_setup(4,trace); selected_batch_effect=(int)kind;
+            invoke_selected(); assert(positions==4 && restores==3 && !clears);
+            assert(!EqualRect(&fake[0].native,&fake[0].original));
+            for (i=1;i<4;++i) assert(EqualRect(&fake[i].native,&fake[i].original));
+        }
+        selected_setup(4,trace); maximize(0); normalize_effect_at=1; normalize_effect=2;
+        invoke_selected(); assert(!positions && !max_restores && !fake[0].zoomed);
+        for (kind=0;kind<6;++kind) {
+            selected_setup(4,trace);
+            if (kind==0) state.action.ac=1;
+            if (kind==1) g_InMouseMove=1;
+            if (kind==2) g_InFinishMovement=1;
+            if (kind==3) LastWin.hwnd=1;
+            if (kind==4) linked_queue.busy=1;
+            if (kind==5) linked_move.pending=1;
+            invoke_selected(); unchanged(); assert(!selected_scans && !captures && !positions);
+        }
+        selected_setup(1,trace); last_error=1234567;
+        {
+            ATGSelectedOwned selected={1,102,1,10,10};
+            assert(AutoTileSelectedOwnedValid(&selected) && last_error==1234567);
+            owner_style_fail=1;
+            assert(!AutoTileSelectedOwnedValid(&selected) && last_error==1234567);
+        }
+        assert(!strstr(trace_log,"#32770") && !strstr(trace_log,"Class")
+               && !strstr(trace_log,"test.exe") && !strstr(trace_log,"C:\\"));
+    }
+}
 int main(void)
 {
     layouts_and_refusals(); exclusions(); recovery_and_drag(); maximized_and_overhang(); diagnostic_trace(); limited_fallback_and_owner_safety();
     owner_topology_trace();
+    explicitly_selected_owned();
+    puts("auto_tile_grid_selected: one-shot selection, strict guards, modal/modeless dialogs, stale identities, blacklists, five windows and guarded rollback passed (no Windows GUI)");
     puts("auto_tile_grid_win_stubs: layouts, recovery, exclusions, owner topology/races, 4096 trace on/off combinations and fixed log vocabulary passed (no Windows GUI)");
     return 0;
 }

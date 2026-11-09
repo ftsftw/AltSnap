@@ -35,10 +35,11 @@ import pathlib, sys
 config = pathlib.Path(sys.argv[1]).read_bytes().decode('utf-16')
 assert 'LinkedGridResize=0' in config
 assert 'StickyResize=0' in config
-assert not any(line.strip().startswith('AutoTileGrid=') and
+assert not any(line.strip().startswith(('AutoTileGrid=', 'AutoTileGridSelected=')) and
                line.strip().split('=', 1)[1] != '0' for line in config.splitlines())
 # Trace is opt-in even if the default template does not mention it.
 assert not any(line.strip() == 'LinkedGridTrace=1' for line in config.splitlines())
+assert not any(line.strip() == 'AutoTileTrace=1' for line in config.splitlines())
 PY
 mkdir -p "$output"
 rm -f "$output/$package.zip"

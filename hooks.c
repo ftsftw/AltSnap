@@ -6412,9 +6412,12 @@ LRESULT CALLBACK HooksWinPorc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             ptwindow = 1;
         }
 
-        if (action.ac == AC_AUTOTILEGRID) {
+        if (action.ac == AC_AUTOTILEGRID || action.ac == AC_AUTOTILEGRIDSELECTED) {
             POINT cursor;
-            if (GetCursorPos(&cursor)) AutoTileGrid(cursor);
+            if (GetCursorPos(&cursor)) {
+                if (action.ac == AC_AUTOTILEGRIDSELECTED) AutoTileGridSelected(cursor);
+                else AutoTileGrid(cursor);
+            }
             return 0;
         }
 
