@@ -116,7 +116,7 @@ the token after validation and before starting ApplyLinkedRects. There are no
 callbacks/position changes in BeginDeferWindowPos/DeferWindowPos; EndDeferWindowPos
 is the batch application boundary. An already entered batch may finish after
 Escape. On return, cancellation prevents further application (including the
-existing best-effort recovery batch). No rollback-on-Escape is added. A nested
+best-effort individual recovery attempts). No rollback-on-Escape is added. A nested
 modal loop dispatching another movement/finalizer while busy cancels the operation
 instead of recursively applying or leaving the finish flag stuck.
 
@@ -180,21 +180,34 @@ The ordinary AltSnap preview still uses MoveTransWin. Cancellation, participant
 loss, and finish hide the linked outline; a generation check after moving its
 window prevents it from being shown again following reentrant cancellation.
 
-A failed or partially applied batch now checks each participant's original
-thread/process identity, DPI, visibility and DWM border, and compares its actual
-native rectangle with the last verified rectangle and requested rectangle.
-Only a participant at the requested rectangle is eligible for restoration.
-A third rectangle is treated as an external change and left untouched. The
-adapter tries a common batch only while all four identities remain valid; it
-then retries eligible survivors individually, rechecking identity, rectangle
-and generation before each SetWindowPos. Each attempt is verified, and the drag
-is frozen after any failed application. Cancellation stops further recovery.
-Win32 can still reject individual restores, change a window between checks, or
-reuse a handle with the same thread/process identity. Absolute atomicity is
-not guaranteed.
+A failed or partially applied batch checks each participant's original
+thread/process identity, DPI, visibility and DWM border. Recovery compares the
+current native RECT with the saved immediate post-apply observation. A successful
+forward batch can grant a size-correction witness with the requested left/top and
+positive dimensions; failed batches grant only exact requested observations.
+Changed origins and unreadable observations are skipped. This repairs the supplied
+Windows 10 +107 right-edge correction when the participant accepts the old size.
 
-The recovery policy has portable deterministic cases for failure and disappearance
-of every participant, third-party rectangle changes, partial restoration and
-refusal. They are policy tests, not a Windows GUI execution of DeferWindowPos,
-WM_SIZING, or DWM frame behavior. Real preview matching and rollback behavior
-still require Windows GUI verification.
+There is no common rollback batch. Each participant is rechecked just before its
+one SetWindowPos attempt, after any earlier participant's positioning callback
+returns. A later external RECT is skipped even if it equals the original request.
+Already restored participants need no write. Every attempted restore is verified;
+refusal is diagnosed without retry. Cancellation/generation checks prevent further
+writes from an old operation, including after returning from recovery. Ordinary
+successful forward batches, preview, mouse processing and the mailbox are unchanged.
+
+A same-origin external resize before the first post-apply observation is still
+indistinguishable from an app correction; a final check-to-position race and HWND
+reuse in the same process/thread remain. Frame/DPI/state checks may exclude a
+participant, and applications can refuse restoration. This preserves observed
+external changes but cannot guarantee grid integrity against arbitrary application
+code. See [diagnostics and limitations](LINKED_GRID_DIAGNOSTICS.md) for the real
+trace, conservative fallback and Windows retest procedure.
+
+The production adapter stub tests cover the exact native RECT +107 case, all
+four participants restoring to the last verified grid, refusal, changed origins,
+failed API calls, external changes before selection and at recheck, a callback
+moving a later window, disappearance, identity replacement, cancellation and stale
+generations. They are deterministic tests, not a Windows GUI execution. Real
+preview matching, application callbacks and rollback behavior still require
+Windows GUI verification.

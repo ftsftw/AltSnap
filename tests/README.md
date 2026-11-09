@@ -67,7 +67,9 @@ AutoTileGrid usage, conservative eligibility, automated coverage, and the pendin
 Windows GUI checklist are documented in [AUTO_TILE_GRID.md](../AUTO_TILE_GRID.md).
 
 The test target also runs `linked_grid_win_test.c`, which includes the production
-Win32 adapter against deterministic stubs for exact sizing, corrections, refusal,
-delayed DWM, late native changes and rollback. These are not Windows GUI tests.
+Win32 adapter against deterministic stubs for exact sizing, the supplied +107
+right-edge correction and full rollback, refusal to accept the old size, external
+changes between checks/participant restores, disappearance/identity replacement,
+cancellation/stale generations, delayed DWM and late native changes. These are not Windows GUI tests.
 See [fast movement diagnostics](LINKED_GRID_DIAGNOSTICS.md) for evidence, remaining
 hypotheses and the opt-in `LinkedGridTrace=1` Windows test procedure.
