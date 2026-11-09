@@ -44,24 +44,114 @@ legacy-DPI window may cause a safe refusal; do not force resizing or elevate
 AltSnap just to bypass it. Remove the shortcut or set `AutoTileGrid=0` and
 restart to disable its registration.
 
-For AutoTileGrid diagnostics, set `AutoTileTrace=1` in the existing `[General]`
-section and restart. Leave it absent/0 normally. Capture debugger output with
-DebugView (Win32 capture) or an attached debugger, press the shortcut once, then
-filter `AltSnap.ATG`. Output contains fixed reason codes and participant counts
-or zero-based participant indices only: no handles, process IDs, executable names,
-window titles, geometry or content. No log file or worker is created, and the
-trace does not issue extra window queries. Disable it again after diagnosis.
+## Eligibility diagnostics (next Windows test)
 
-Useful codes: `skip-monitor`, `skip-hidden-or-fullscreen`, `skip-nonordinary`,
-`skip-disabled-or-blacklisted`, `skip-process`, `skip-dwm`,
-`skip-borderless-overhang`, `too-many`, `placement`, `dpi-rect-limits`,
-`frame-overflow`, `frame-limits`, `preflight-changed`, `normalized`,
-`normalize-failed`, `normalized-capture-changed`, `normalized-preflight-changed`,
-`no-feasible-plan`, `batch-create-failed`, `batch-verification-failed`,
-`cancelled`, `restore-max[-failed]`, `restore-normal[-failed]`, `unchanged`,
-`success`. `capture` is the final summary for an empty or failed capture;
-`busy-or-no-monitor` means the command cannot start. The trace can contain
-several exclusion records because the safety checks capture more than once.
+The supplied Windows 10 GUI test confirms Chrome, OpenCode and Windows Terminal,
+including maximized 1–4-window tiling followed by Linked Grid Resize. VS Code
+was excluded by the old combined `skip-process`, and MobaXterm by the old
+combined `skip-nonordinary`. Their specific blocking predicates are **not yet
+known**. This revision adds diagnostics; it does not claim to fix compatibility.
+
+Set `AutoTileTrace=1` in the existing `[General]` section and restart AltSnap.
+Capture Win32 debugger output with DebugView, filter **AltSnap.ATG**, clear the
+capture before each test, and press the shortcut once. Keep the full filtered
+output through the final outcome. Test separately:
+
+1. One VS Code window, with other eligible windows minimized.
+2. One MobaXterm window, first normal and then maximized.
+3. The four-window mix: VS Code, MobaXterm, OpenCode and Windows Terminal.
+4. The previously working Chrome/OpenCode/Windows Terminal layouts and a
+   four-window layout followed by Linked Grid Resize (FullWin=0 and FullWin=1).
+5. Repeat the successful controls with tracing off to check timing influence.
+
+Record app/state/monitor/scaling/privilege level manually, outside the trace.
+Disable `AutoTileTrace` afterwards. Do not elevate AltSnap to force participation.
+No trace files, window identifiers, titles, executable names, paths, PID/TID,
+geometry or content are emitted. Only fixed codes, counts/participant indices
+and numeric Win32 errors are written. No extra diagnostic window/process queries
+or GetLastError/SetLastError calls run with `AutoTileTrace=0`.
+
+Each capture is bracketed by `scan-begin count=0` and `scan-candidates count=N`.
+Monitor/invisible/cloaked/zero-size/minimized exclusions are aggregated into at
+most one line **per reason per capture**, e.g. `skip-invisible count=500`.
+Other eligibility records have `count=1`. Safety checks intentionally perform
+multiple captures; these are separate passes, not unique-window counts.
+Identity rechecks outside enumeration can also emit individual rejection records.
+
+| Event | First rejecting predicate / meaning |
+| --- | --- |
+| `skip-monitor` | Assigned to another monitor or no monitor |
+| `skip-invisible`, `skip-cloaked`, `skip-zero-size`, `skip-minimized` | Visibility/snap helper exclusions (aggregated) |
+| `skip-snap-shape` | No full caption, thick frame, AltSnap borderless flag or Snaplist match |
+| `skip-snap-state-changed` | Snap helper refused, but diagnostic reread no longer explains it |
+| `skip-noactivate`, `skip-fullscreen` | No-activate flag or existing fullscreen helper |
+| `skip-thread-query`, `skip-own-process` | Failed thread/process query or AltSnap's current process |
+| `skip-desktop`, `skip-shell` | Desktop or shell window |
+| `skip-child`, `skip-no-thickframe` | WS_CHILD or missing WS_THICKFRAME |
+| `skip-maximized-no-caption` | Maximized without the full WS_CAPTION bits |
+| `skip-toolwindow`, `skip-owner`, `skip-not-enabled` | Toolwindow flag, owner, or disabled window |
+| `skip-taskbar`, `skip-secondary-taskbar`, `skip-progman`, `skip-worker` | Existing shell class exclusions (fixed categories, no class text) |
+| `skip-move-disabled`, `skip-rolled` | Existing AltSnap properties |
+| `skip-blacklist-process`, `skip-blacklist-window`, `skip-blacklist-bottommost` | Existing corresponding blacklist matched |
+| `skip-process-unreadable` | Terminal process identity lookup failure; inspect preceding `process-*` events |
+| `skip-altsnap-exe` | Readable identity matched the AltSnap executable exclusion |
+
+The snap helper stays unchanged. Only after it rejects, tracing rereads its
+constituent predicates to classify the rejection. Those diagnostic observations
+can race with window changes and never change eligibility; a mismatch should be
+retested with the window stable. Ordinary/style/owner checks emit the actual
+first short-circuited reason. One record need not reveal every possible blocker.
+No WS_THICKFRAME, child, owner, fullscreen or other safety check was relaxed.
+
+Process detail uses `reason=... error=N` (not `count`):
+
+| Event | Stage |
+| --- | --- |
+| `process-window-thread-failed` | GetWindowThreadProcessId failed |
+| `process-window-id-missing` | No usable process ID returned (no ID is emitted) |
+| `process-open-vm-failed` | OpenProcess(QUERY_INFORMATION | VM_READ) failed |
+| `process-open-query-failed` | Fallback OpenProcess(QUERY_INFORMATION) failed |
+| `process-module-failed` | GetModuleFileNameEx failed |
+| `process-image-failed` | Fallback GetProcessImageFileName failed |
+| `process-name-at-capacity` | Legacy API result reached buffer capacity; possible truncation |
+| `process-host-no-child`, `process-host-child-failed`, `process-host-child-used` | Existing ApplicationFrameHost child-identity fallback outcome |
+
+Error 5 is access denied, 299 is partial copy, 122 is insufficient buffer and
+127 means a missing dynamically loaded export (or an API-reported error 127).
+Error 0 means no error was supplied or a non-error diagnostic event. LastError
+is cleared before the traced call and sampled immediately on failure, before
+CloseHandle or debug output. A failed first stage **can recover** through a
+fallback: only the terminal `skip-process-unreadable` means process exclusion.
+For VS Code, retain these stage/error lines plus both scan markers and final
+`capture`, `success` or other refusal event. For MobaXterm, retain the exact
+`skip-*` reason and scan/final events for both show states and the mixed test.
+
+### Process lookup review
+
+The legacy lookup uses module-name PSAPI with QUERY_INFORMATION | VM_READ;
+when that open fails, it opens with QUERY_INFORMATION and uses image-name PSAPI.
+When the first open succeeds but module lookup fails it uses image-name PSAPI
+on that same handle. It strips the path and preserves the existing UWP child
+lookup and AltSnap.exe exclusion. Blacklists use the same untraced entry point.
+
+QueryFullProcessImageName with QUERY_LIMITED_INFORMATION is a possible future
+identity lookup improvement, but the old `skip-process` does not establish an
+access-rights failure, cross-bitness failure, buffer failure, or even distinguish
+AltSnap.exe. No alternate access path or application-specific exception is added
+before that evidence. Unreadable identities remain excluded, process blacklists
+are unchanged, and no elevation or foreign-process child search is introduced.
+The extracted shared helper has the same API order, rights and return behavior;
+its optional callback observes stages only. This is a diagnostic-only revision.
+
+Other existing codes: `skip-dwm`, `skip-borderless-overhang`, `too-many`,
+`placement`, `dpi-rect-limits`, `frame-overflow`, `frame-limits`,
+`preflight-changed`, `normalized`, `normalize-failed`,
+`normalized-capture-changed`, `normalized-preflight-changed`, `no-feasible-plan`,
+`batch-create-failed`, `batch-verification-failed`, `cancelled`,
+`restore-max[-failed]`, `restore-normal[-failed]`, `unchanged`, `success`.
+`capture count=0` is the final summary for an empty or failed capture;
+`busy-or-no-monitor` means the command cannot start. Successful tiling uses
+`success count=N`; that result alone does not establish support for omitted apps.
 
 `LinkedGridTrace` remains a separate **Linked Grid Resize** diagnostic setting;
 see [its diagnostics](tests/LINKED_GRID_DIAGNOSTICS.md).

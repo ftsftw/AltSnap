@@ -31,6 +31,47 @@ static int AutoTileSkip(const char *reason)
     return 0;
 }
 
+static void AutoTileProcessTrace(const char *stage, DWORD error)
+{
+    char line[128];
+    if (!auto_tile_trace) return;
+    wsprintfA(line, "AltSnap.ATG reason=%s error=%lu\n", stage, (unsigned long)error);
+    OutputDebugStringA(line);
+}
+
+/* Routine desktop enumeration exclusions are summarized once per capture.
+   No counters or diagnostic helper queries run with tracing disabled. */
+static const char *const auto_tile_quiet_reasons[] = {
+    "skip-monitor", "skip-invisible", "skip-cloaked", "skip-zero-size", "skip-minimized"
+};
+static int AutoTileQuietSkip(unsigned *quiet, unsigned reason)
+{
+    if (auto_tile_trace) {
+        if (quiet) ++quiet[reason];
+        else AutoTileTrace(auto_tile_quiet_reasons[reason], 1);
+    }
+    return 0;
+}
+
+/* Diagnose the first failed IsSnapCandidate predicate only after it refuses.
+   Keep the shared snap helper and its short-circuit semantics unchanged. These
+   additional observations can race; they never decide eligibility. */
+static int AutoTileSnapSkip(HWND hwnd, unsigned *quiet)
+{
+    if (!auto_tile_trace) return 0;
+    if (!IsWindowVisible(hwnd)) return AutoTileQuietSkip(quiet, 1);
+    if (IsWindowCloaked(hwnd)) return AutoTileQuietSkip(quiet, 2);
+    if (HasWindowSizeZero(hwnd)) return AutoTileQuietSkip(quiet, 3);
+    if (IsIconic(hwnd)) return AutoTileQuietSkip(quiet, 4);
+    if (GetWindowLongPtr(hwnd, GWL_EXSTYLE) & WS_EX_NOACTIVATE)
+        return AutoTileSkip("skip-noactivate");
+    if ((GetWindowLongPtr(hwnd, GWL_STYLE) & WS_CAPTION) != WS_CAPTION
+        && !(GetWindowLongPtr(hwnd, GWL_STYLE) & WS_THICKFRAME)
+        && !GetBorderlessFlag(hwnd) && !blacklisted(hwnd, &BlkLst.Snaplist))
+        return AutoTileSkip("skip-snap-shape");
+    return AutoTileSkip("skip-snap-state-changed");
+}
+
 static LGRect AutoTileRect(RECT r)
 {
     return (LGRect){ r.left, r.top, r.right, r.bottom };
@@ -55,43 +96,57 @@ static int AutoTilePerMonitorAware(HWND hwnd)
     return context && awareness && awareness(context(hwnd)) == 2;
 }
 
-static int AutoTileEligible(HWND hwnd, const ATGSnapshot *s)
+static int AutoTileEligible(HWND hwnd, const ATGSnapshot *s, unsigned *quiet)
 {
     DWORD pid;
     TCHAR exe[MAX_PATH];
     LONG_PTR style = GetWindowLongPtr(hwnd, GWL_STYLE);
     LONG_PTR exstyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
     if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL) != s->monitor)
-        return AutoTileSkip("skip-monitor");
-    if (!IsSnapCandidate(hwnd) || IsFullscreen(hwnd)) return AutoTileSkip("skip-hidden-or-fullscreen");
-    if (!GetWindowThreadProcessId(hwnd, &pid) || pid == GetCurrentProcessId()
-        || hwnd == GetDesktopWindow() || hwnd == GetShellWindow()
-        || (style & WS_CHILD) || !(style & WS_THICKFRAME)
-        || (IsZoomed(hwnd) && (style & WS_CAPTION) != WS_CAPTION)
-        || (exstyle & (WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE))
-        || GetWindow(hwnd, GW_OWNER) || !IsWindowEnabled(hwnd)
-        || isClassName(hwnd, TEXT("Shell_TrayWnd"))
-        || isClassName(hwnd, TEXT("Shell_SecondaryTrayWnd"))
-        || isClassName(hwnd, TEXT("Progman")) || isClassName(hwnd, TEXT("WorkerW")))
-        return AutoTileSkip("skip-nonordinary");
-    if (GetProp(hwnd, APP_MOVEONOFF) || GetProp(hwnd, APP_ROLLED)
-        || blacklisted(hwnd, &BlkLst.Processes) || blacklisted(hwnd, &BlkLst.Windows)
-        || blacklisted(hwnd, &BlkLst.Bottommost)) return AutoTileSkip("skip-disabled-or-blacklisted");
+        return AutoTileQuietSkip(quiet, 0);
+    if (!IsSnapCandidate(hwnd)) return AutoTileSnapSkip(hwnd, quiet);
+    if (IsFullscreen(hwnd)) return AutoTileSkip("skip-fullscreen");
+    if (!GetWindowThreadProcessId(hwnd, &pid)) return AutoTileSkip("skip-thread-query");
+    if (pid == GetCurrentProcessId()) return AutoTileSkip("skip-own-process");
+    if (hwnd == GetDesktopWindow()) return AutoTileSkip("skip-desktop");
+    if (hwnd == GetShellWindow()) return AutoTileSkip("skip-shell");
+    if (style & WS_CHILD) return AutoTileSkip("skip-child");
+    if (!(style & WS_THICKFRAME)) return AutoTileSkip("skip-no-thickframe");
+    if (IsZoomed(hwnd) && (style & WS_CAPTION) != WS_CAPTION)
+        return AutoTileSkip("skip-maximized-no-caption");
+    if (exstyle & WS_EX_TOOLWINDOW) return AutoTileSkip("skip-toolwindow");
+    if (exstyle & WS_EX_NOACTIVATE) return AutoTileSkip("skip-noactivate");
+    if (GetWindow(hwnd, GW_OWNER)) return AutoTileSkip("skip-owner");
+    if (!IsWindowEnabled(hwnd)) return AutoTileSkip("skip-not-enabled");
+    if (isClassName(hwnd, TEXT("Shell_TrayWnd"))) return AutoTileSkip("skip-taskbar");
+    if (isClassName(hwnd, TEXT("Shell_SecondaryTrayWnd"))) return AutoTileSkip("skip-secondary-taskbar");
+    if (isClassName(hwnd, TEXT("Progman"))) return AutoTileSkip("skip-progman");
+    if (isClassName(hwnd, TEXT("WorkerW"))) return AutoTileSkip("skip-worker");
+    if (GetProp(hwnd, APP_MOVEONOFF)) return AutoTileSkip("skip-move-disabled");
+    if (GetProp(hwnd, APP_ROLLED)) return AutoTileSkip("skip-rolled");
+    if (blacklisted(hwnd, &BlkLst.Processes)) return AutoTileSkip("skip-blacklist-process");
+    if (blacklisted(hwnd, &BlkLst.Windows)) return AutoTileSkip("skip-blacklist-window");
+    if (blacklisted(hwnd, &BlkLst.Bottommost)) return AutoTileSkip("skip-blacklist-bottommost");
     /* Also require a readable process identity, including for process blacklists.
        Never elevate or attempt to force inaccessible/protected windows. */
-    if (!GetWindowProgName(hwnd, exe, ARR_SZ(exe))
-        || !lstrcmpi(exe, TEXT("AltSnap.exe"))) return AutoTileSkip("skip-process");
+    if (!GetWindowProgNameTraced(hwnd, exe, ARR_SZ(exe),
+                               auto_tile_trace ? AutoTileProcessTrace : NULL))
+        return AutoTileSkip("skip-process-unreadable");
+    if (!lstrcmpi(exe, TEXT("AltSnap.exe"))) return AutoTileSkip("skip-altsnap-exe");
     return 1;
 }
 
+typedef struct { ATGSnapshot *snapshot; unsigned quiet[5]; } ATGCapture;
+
 static BOOL CALLBACK EnumAutoTileGrid(HWND hwnd, LPARAM lp)
 {
-    ATGSnapshot *s = (ATGSnapshot *)lp;
+    ATGCapture *capture = (ATGCapture *)lp;
+    ATGSnapshot *s = capture->snapshot;
     RECT visible, native, border;
     POINT lo, hi;
     int64_t bx, by, bl, bt, br, bb;
     unsigned i = s->count;
-    if (!AutoTileEligible(hwnd, s)) return TRUE;
+    if (!AutoTileEligible(hwnd, s, capture->quiet)) return TRUE;
     /* MonitorFromWindow assigns the largest intersection (no nearest fallback).
        Partial overhang is allowed; all geometry remains signed screen space. */
     if (S_OK != DwmGetWindowAttributeL(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS,
@@ -150,6 +205,9 @@ static BOOL CALLBACK EnumAutoTileGrid(HWND hwnd, LPARAM lp)
 static int AutoTileCapture(HMONITOR monitor, ATGSnapshot *s)
 {
     UINT dx, dy;
+    int enumerated;
+    unsigned i;
+    ATGCapture capture;
     mem00(s, sizeof *s);
     s->monitor = monitor;
     s->mi.cbSize = sizeof s->mi;
@@ -157,15 +215,25 @@ static int AutoTileCapture(HMONITOR monitor, ATGSnapshot *s)
         || S_OK != GetDpiForMonitorL(monitor, MDT_DEFAULT, &dx, &dy)
         || !dx || dx != dy) return 0;
     s->dpi = dx;
-    return EnumDesktopWindows(NULL, EnumAutoTileGrid, (LPARAM)s)
-        && !s->failed && s->count;
+    capture.snapshot = s;
+    if (auto_tile_trace) {
+        mem00(capture.quiet, sizeof capture.quiet);
+        AutoTileTrace("scan-begin", 0);
+    }
+    enumerated = EnumDesktopWindows(NULL, EnumAutoTileGrid, (LPARAM)&capture);
+    if (auto_tile_trace) {
+        for (i = 0; i < ARR_SZ(capture.quiet); ++i)
+            if (capture.quiet[i]) AutoTileTrace(auto_tile_quiet_reasons[i], capture.quiet[i]);
+        AutoTileTrace("scan-candidates", s->count);
+    }
+    return enumerated && !s->failed && s->count;
 }
 
 static int AutoTileIdentity(const ATGSnapshot *s, unsigned i)
 {
     DWORD pid;
     return GetWindowThreadProcessId(s->hwnd[i], &pid) == s->tid[i]
-        && pid == s->pid[i] && AutoTileEligible(s->hwnd[i], s)
+        && pid == s->pid[i] && AutoTileEligible(s->hwnd[i], s, NULL)
         && AutoTilePerMonitorAware(s->hwnd[i])
         && GetDpiForWindow(s->hwnd[i]) == s->dpi;
 }

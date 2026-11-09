@@ -18,6 +18,17 @@ borders after normalization, overhang at every edge, negative workspace origins
 with top/left taskbars, changed enumeration order, original full placement
 recovery, partial normalization/API failures, late show-state/DPI/identity/monitor
 changes and opt-in diagnostics. This does not run Windows GUI code.
+Process-name helper tests also include the production compatibility helper
+against API stubs: original access rights and call order, module/image and open
+failures, exact Win32 error capture, missing dynamically loaded APIs, handle
+closure, buffer-capacity diagnostics, and ApplicationFrameHost child fallback.
+They check identical lookup operations/results with tracing on/off and no
+GetLastError/SetLastError calls with tracing off. AutoTile adapter tests cover all
+30 constituent skip reasons, blacklist precedence, zero extra diagnostic reads
+with tracing off, and 1,000 routine exclusions reduced to one count per capture.
+No process/window identifiers or names are sent to the trace. See the
+[next Windows diagnostic procedure](../AUTO_TILE_GRID.md#eligibility-diagnostics-next-windows-test).
+
 Warnings are errors. To check address and undefined behaviour sanitizers:
 
 ```

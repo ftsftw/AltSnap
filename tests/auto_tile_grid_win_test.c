@@ -56,7 +56,7 @@ static struct { HWND hwnd; } LastWin;
 static int g_InMouseMove, g_InFinishMovement;
 static struct { int busy; } linked_queue;
 static struct { int pending; } linked_move;
-static struct { int Processes, Windows, Bottommost; } BlkLst;
+static struct { int Processes, Windows, Bottommost, Snaplist; } BlkLst;
 static LONG generation;
 static unsigned count, captures, positions, restores, batches, clears;
 static int fail_batch, fail_defer, cancel_batch, start_drag, change_preflight;
@@ -65,6 +65,7 @@ static unsigned normalizes, max_restores, trace_lines;
 static int fail_normalize, fail_max_restore, normalize_effect, normalize_effect_at;
 static int placement_fail, change_placement_preflight, fail_begin;
 static unsigned frame_reads_after_normalize;
+static unsigned diagnostic_queries, traced_process_calls, enum_repeats;
 static char trace_log[16384];
 static size_t trace_used;
 static int wsprintfA(char *buf, const char *fmt, ...)
@@ -86,6 +87,8 @@ static struct FakeWindow {
     DWORD pid;
     int aware, dpi, enabled, visible, owned, zoomed, fullscreen;
     int blacklisted, prop, dwm_fail, min_fail, identity_fail, behavior;
+    int cloaked, zero, iconic, borderless, snaplisted, snap_changed;
+    int shell_kind, class_kind, name_fail, altsnap_exe;
     POINT lo, hi;
 } fake[6];
 static RECT targets[6];
@@ -98,19 +101,46 @@ static LONG_PTR GetWindowLongPtr(HWND w, int which) { return which ? win(w)->exs
 static DWORD GetWindowThreadProcessId(HWND w, DWORD *pid)
 { *pid=win(w)->pid; return win(w)->identity_fail ? 0 : 10; }
 static DWORD GetCurrentProcessId(void) { return 999; }
-static HWND GetDesktopWindow(void) { return 100; }
-static HWND GetShellWindow(void) { return 101; }
+static HWND GetDesktopWindow(void) { return fake[0].shell_kind==1 ? 1 : 100; }
+static HWND GetShellWindow(void) { return fake[0].shell_kind==2 ? 1 : 101; }
 static HWND GetWindow(HWND w, int which) { (void)which; return win(w)->owned ? 102 : 0; }
 static int IsWindowEnabled(HWND w) { return win(w)->enabled; }
-static int IsSnapCandidate(HWND w) { return win(w)->visible; }
+static int IsWindowVisible(HWND w) { ++diagnostic_queries; return win(w)->visible; }
+static int IsWindowCloaked(HWND w) { ++diagnostic_queries; return win(w)->cloaked; }
+static int HasWindowSizeZero(HWND w) { ++diagnostic_queries; return win(w)->zero; }
+static int IsIconic(HWND w) { ++diagnostic_queries; return win(w)->iconic; }
+static int GetBorderlessFlag(HWND w) { ++diagnostic_queries; return win(w)->borderless; }
+static int IsSnapCandidate(HWND w)
+{
+    struct FakeWindow *f=win(w);
+    return f->visible && !f->cloaked && !f->zero && !f->iconic && !f->snap_changed
+        && !(f->exstyle & WS_EX_NOACTIVATE)
+        && ((f->style & WS_CAPTION)==WS_CAPTION || (f->style & WS_THICKFRAME)
+            || f->borderless || f->snaplisted);
+}
 static int IsZoomed(HWND w) { return win(w)->zoomed; }
 static int IsFullscreen(HWND w) { return win(w)->fullscreen; }
 static int GetProp(HWND w, int prop) { return win(w)->prop==prop; }
 static HMONITOR MonitorFromWindow(HWND w, int flags) { (void)flags; return win(w)->monitor; }
-static int isClassName(HWND w, const char *name) { (void)w; (void)name; return 0; }
-static int blacklisted(HWND w, const int *list) { (void)list; return win(w)->blacklisted; }
-static int GetWindowProgName(HWND w, TCHAR *buf, size_t n)
-{ (void)n; strcpy(buf,"test.exe"); return !win(w)->identity_fail; }
+static int isClassName(HWND w, const char *name)
+{
+    const char *names[]={"", "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Progman", "WorkerW"};
+    return !strcmp(name,names[win(w)->class_kind]);
+}
+static int blacklisted(HWND w, const int *list)
+{
+    if (list==&BlkLst.Snaplist) return win(w)->snaplisted;
+    return win(w)->blacklisted==(list==&BlkLst.Processes ? 1 : list==&BlkLst.Windows ? 2 : 3);
+}
+static int GetWindowProgNameTraced(HWND w, TCHAR *buf, size_t n,
+                                 void (*trace)(const char *, DWORD))
+{
+    (void)n;
+    if (trace) ++traced_process_calls;
+    strcpy(buf,win(w)->altsnap_exe ? "AltSnap.exe" : "test.exe");
+    if (win(w)->name_fail && trace) trace("process-image-failed",5);
+    return !win(w)->identity_fail && !win(w)->name_fail;
+}
 static int lstrcmpi(const TCHAR *a, const char *b) { return strcmp(a,b); }
 static UINT GetDpiForWindow(HWND w) { return (UINT)win(w)->dpi; }
 static HANDLE dpi_context(HWND w) { return (HANDLE)win(w)->aware; }
@@ -146,10 +176,11 @@ static int GetDpiForMonitorL(HMONITOR m, int kind, UINT *x, UINT *y)
 { (void)m; (void)kind; *x=*y=96; return S_OK; }
 static int EnumDesktopWindows(void *desktop, BOOL (*callback)(HWND,LPARAM), LPARAM lp)
 {
-    HWND w; (void)desktop; ++captures;
+    HWND w; unsigned repeat; (void)desktop; ++captures;
     for (w=1; w<=count; ++w) {
         HWND next=reverse_enum && captures%2==0 ? count+1-w : w;
-        if (!callback(next,lp)) return 0;
+        for (repeat=0;repeat<(w==1 ? enum_repeats : 1);++repeat)
+            if (!callback(next,lp)) return 0;
     }
     return 1;
 }
@@ -250,6 +281,7 @@ static void reset(unsigned n)
     external_restore=replace_restore=reverse_enum=batch_effect=restore_fail=0;
     normalizes=max_restores=trace_lines=frame_reads_after_normalize=0;
     trace_used=0; trace_log[0]=0; auto_tile_trace=0;
+    diagnostic_queries=traced_process_calls=0; enum_repeats=1;
     fail_normalize=fail_max_restore=normalize_effect=normalize_effect_at=0;
     placement_fail=change_placement_preflight=fail_begin=0;
     monitor_rect=(RECT){0,0,1200,1000}; work_rect=(RECT){0,0,1200,960};
@@ -449,7 +481,70 @@ static void maximized_and_overhang(void)
 }
 static void diagnostic_trace(void)
 {
-    reset(4); invoke(); assert(!trace_lines);
+    unsigned kind, enabled;
+    const char *reasons[]={
+        "skip-monitor", "skip-invisible", "skip-cloaked", "skip-zero-size", "skip-minimized",
+        "skip-noactivate", "skip-snap-shape", "skip-snap-state-changed", "skip-fullscreen",
+        "skip-thread-query", "skip-own-process", "skip-desktop", "skip-shell", "skip-child",
+        "skip-no-thickframe", "skip-maximized-no-caption", "skip-toolwindow", "skip-owner",
+        "skip-not-enabled", "skip-taskbar", "skip-secondary-taskbar", "skip-progman", "skip-worker",
+        "skip-move-disabled", "skip-rolled", "skip-blacklist-process", "skip-blacklist-window",
+        "skip-blacklist-bottommost", "skip-process-unreadable", "skip-altsnap-exe"
+    };
+    reset(4); invoke(); assert(!trace_lines && !diagnostic_queries && !traced_process_calls);
+    /* Same production eligibility decisions with tracing on and off, every
+       constituent refusal. The model keeps diagnostic-only reads countable. */
+    for (kind=0;kind<ARR_SZ(reasons);++kind) for (enabled=0;enabled<=1;++enabled) {
+        reset(1); auto_tile_trace=(int)enabled;
+        switch(kind) {
+        case 0: fake[0].monitor=2; break;
+        case 1: fake[0].visible=0; break;
+        case 2: fake[0].cloaked=1; break;
+        case 3: fake[0].zero=1; break;
+        case 4: fake[0].iconic=1; break;
+        case 5: fake[0].exstyle=WS_EX_NOACTIVATE; break;
+        case 6: fake[0].style=0; break;
+        case 7: fake[0].snap_changed=1; break;
+        case 8: fake[0].fullscreen=1; break;
+        case 9: fake[0].identity_fail=1; break;
+        case 10: fake[0].pid=999; break;
+        case 11: fake[0].shell_kind=1; break;
+        case 12: fake[0].shell_kind=2; break;
+        case 13: fake[0].style|=WS_CHILD; break;
+        case 14: fake[0].style=WS_CAPTION; break;
+        case 15: fake[0].style=WS_THICKFRAME; fake[0].zoomed=1; break;
+        case 16: fake[0].exstyle=WS_EX_TOOLWINDOW; break;
+        case 17: fake[0].owned=1; break;
+        case 18: fake[0].enabled=0; break;
+        case 19: case 20: case 21: case 22: fake[0].class_kind=(int)kind-18; break;
+        case 23: fake[0].prop=APP_MOVEONOFF; break;
+        case 24: fake[0].prop=APP_ROLLED; break;
+        case 25: case 26: case 27: fake[0].blacklisted=(int)kind-24; break;
+        case 28: fake[0].name_fail=1; break;
+        case 29: fake[0].altsnap_exe=1; break;
+        }
+        invoke(); unchanged(); assert(!positions && !normalizes);
+        if (enabled) {
+            assert(strstr(trace_log,reasons[kind]));
+            assert(strstr(trace_log,"reason=scan-candidates count=0"));
+            if (kind==28) assert(strstr(trace_log,"reason=process-image-failed error=5"));
+        } else assert(!trace_lines && !diagnostic_queries && !traced_process_calls);
+        assert(!strstr(trace_log,"test.exe") && !strstr(trace_log,"AltSnap.exe"));
+    }
+    /* Hundreds of routine exclusions produce one count, not hundreds of lines. */
+    for (kind=0;kind<5;++kind) {
+        reset(1); auto_tile_trace=1; enum_repeats=1000;
+        if (kind==0) fake[0].monitor=2;
+        if (kind==1) fake[0].visible=0;
+        if (kind==2) fake[0].cloaked=1;
+        if (kind==3) fake[0].zero=1;
+        if (kind==4) fake[0].iconic=1;
+        invoke(); assert(trace_lines==4 && strstr(trace_log,"count=1000\n"));
+        assert(!positions && !strstr(trace_log,"skip-hidden-or-fullscreen"));
+    }
+    /* A process blacklist cannot be bypassed by a failed name lookup. */
+    reset(1); fake[0].blacklisted=fake[0].name_fail=1; auto_tile_trace=1; invoke();
+    assert(strstr(trace_log,"skip-blacklist-process") && !traced_process_calls && !positions);
     reset(5); auto_tile_trace=1; invoke(); assert(strstr(trace_log,"reason=too-many"));
     reset(4); auto_tile_trace=1; fake[1].dpi=120; invoke();
     assert(strstr(trace_log,"reason=dpi-rect-limits"));

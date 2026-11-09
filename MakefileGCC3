@@ -42,10 +42,10 @@ EXELD = $(LDFLAGS) \
 
 default: AltSnap.exe hooks.dll
 
-hooks.dll : hooks.c hooks.h hooksr.o unfuck.h nanolibc.h zones.c snap.c linked_grid_win.h linked_grid.c linked_grid.h linked_grid_queue.h linked_grid_recovery.h auto_tile_grid_win.h auto_tile_grid.c auto_tile_grid.h
+hooks.dll : hooks.c hooks.h hooksr.o unfuck.h window_process_name.h nanolibc.h zones.c snap.c linked_grid_win.h linked_grid.c linked_grid.h linked_grid_queue.h linked_grid_recovery.h auto_tile_grid_win.h auto_tile_grid.c auto_tile_grid.h
 	$(CC) -o hooks.dll hooks.c hooksr.o $(CFLAGS) $(LDFLAGS) -mdll -fpic -e_DllMain@12 -Wl,--kill-at
 
-AltSnap.exe : altsnapr.o altsnap.c hooks.h tray.c config.c languages.h languages.c unfuck.h nanolibc.h
+AltSnap.exe : altsnapr.o altsnap.c hooks.h tray.c config.c languages.h languages.c unfuck.h window_process_name.h nanolibc.h
 	$(CC) -o AltSnap.exe altsnap.c altsnapr.o $(CFLAGS) $(EXELD) -mwindows -e_unfuckWinMain@0
 
 altsnapr.o : altsnap.rc window.rc resource.h AltSnap.exe.manifest media/find.cur media/find.ico media/icon.ico media/tray-disabled.ico media/tray-enabled.ico
