@@ -96,6 +96,20 @@ static int AutoTilePerMonitorAware(HWND hwnd)
     return context && awareness && awareness(context(hwnd)) == 2;
 }
 
+/* Use the very same validated process identity for every list. The general
+   blacklisted() helper can use a drag cache or do another process lookup; a
+   failed/stale lookup there must not let an AutoTile participant bypass a list.
+   Keep the existing wildcard/whitelist matcher and window/class semantics. */
+static int AutoTileBlacklisted(HWND hwnd, const blacklist_t *list, const TCHAR *exe)
+{
+    TCHAR title[256], classname[256];
+    if (!list->length || !list->items) return 0;
+    title[0] = classname[0] = TEXT('\0');
+    GetWindowText(hwnd, title, ARR_SZ(title));
+    GetClassName(hwnd, classname, ARR_SZ(classname));
+    return blacklisted_from_names(list, exe, title, classname);
+}
+
 static int AutoTileEligible(HWND hwnd, const ATGSnapshot *s, unsigned *quiet)
 {
     DWORD pid;
@@ -124,14 +138,14 @@ static int AutoTileEligible(HWND hwnd, const ATGSnapshot *s, unsigned *quiet)
     if (isClassName(hwnd, TEXT("WorkerW"))) return AutoTileSkip("skip-worker");
     if (GetProp(hwnd, APP_MOVEONOFF)) return AutoTileSkip("skip-move-disabled");
     if (GetProp(hwnd, APP_ROLLED)) return AutoTileSkip("skip-rolled");
-    if (blacklisted(hwnd, &BlkLst.Processes)) return AutoTileSkip("skip-blacklist-process");
-    if (blacklisted(hwnd, &BlkLst.Windows)) return AutoTileSkip("skip-blacklist-window");
-    if (blacklisted(hwnd, &BlkLst.Bottommost)) return AutoTileSkip("skip-blacklist-bottommost");
     /* Also require a readable process identity, including for process blacklists.
        Never elevate or attempt to force inaccessible/protected windows. */
     if (!GetWindowProgNameTraced(hwnd, exe, ARR_SZ(exe),
                                auto_tile_trace ? AutoTileProcessTrace : NULL))
         return AutoTileSkip("skip-process-unreadable");
+    if (AutoTileBlacklisted(hwnd, &BlkLst.Processes, exe)) return AutoTileSkip("skip-blacklist-process");
+    if (AutoTileBlacklisted(hwnd, &BlkLst.Windows, exe)) return AutoTileSkip("skip-blacklist-window");
+    if (AutoTileBlacklisted(hwnd, &BlkLst.Bottommost, exe)) return AutoTileSkip("skip-blacklist-bottommost");
     if (!lstrcmpi(exe, TEXT("AltSnap.exe"))) return AutoTileSkip("skip-altsnap-exe");
     return 1;
 }

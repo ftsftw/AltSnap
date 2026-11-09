@@ -48,9 +48,11 @@ restart to disable its registration.
 
 The supplied Windows 10 GUI test confirms Chrome, OpenCode and Windows Terminal,
 including maximized 1–4-window tiling followed by Linked Grid Resize. VS Code
-was excluded by the old combined `skip-process`, and MobaXterm by the old
-combined `skip-nonordinary`. Their specific blocking predicates are **not yet
-known**. This revision adds diagnostics; it does not claim to fix compatibility.
+now has a specific process lookup failure: both legacy OpenProcess attempts
+returned access denied (`error=5`), followed by `skip-process-unreadable`.
+MobaXterm returned `skip-owner` both normal and maximized. The limited-query
+fallback below addresses the VS Code lookup case in stubs; a new Windows GUI
+test is still required. MobaXterm remains excluded; no owner exception is added.
 
 Set `AutoTileTrace=1` in the existing `[General]` section and restart AltSnap.
 Capture Win32 debugger output with DebugView, filter **AltSnap.ATG**, clear the
@@ -113,7 +115,12 @@ Process detail uses `reason=... error=N` (not `count`):
 | `process-open-query-failed` | Fallback OpenProcess(QUERY_INFORMATION) failed |
 | `process-module-failed` | GetModuleFileNameEx failed |
 | `process-image-failed` | Fallback GetProcessImageFileName failed |
-| `process-name-at-capacity` | Legacy API result reached buffer capacity; possible truncation |
+| `process-name-at-capacity` | A result reached/exceeded capacity and was rejected |
+| `process-limited-api-missing` | QueryFullProcessImageNameA/W export unavailable (127) |
+| `process-open-limited-failed` | OpenProcess(QUERY_LIMITED_INFORMATION) failed |
+| `process-limited-image-failed` | QueryFullProcessImageName failed, including insufficient buffer (122) |
+| `process-limited-invalid` | API reported success but its count/string was incomplete or invalid |
+| `process-limited-used` | Complete limited-query identity used; no name/path is emitted |
 | `process-host-no-child`, `process-host-child-failed`, `process-host-child-used` | Existing ApplicationFrameHost child-identity fallback outcome |
 
 Error 5 is access denied, 299 is partial copy, 122 is insufficient buffer and
@@ -125,23 +132,6 @@ fallback: only the terminal `skip-process-unreadable` means process exclusion.
 For VS Code, retain these stage/error lines plus both scan markers and final
 `capture`, `success` or other refusal event. For MobaXterm, retain the exact
 `skip-*` reason and scan/final events for both show states and the mixed test.
-
-### Process lookup review
-
-The legacy lookup uses module-name PSAPI with QUERY_INFORMATION | VM_READ;
-when that open fails, it opens with QUERY_INFORMATION and uses image-name PSAPI.
-When the first open succeeds but module lookup fails it uses image-name PSAPI
-on that same handle. It strips the path and preserves the existing UWP child
-lookup and AltSnap.exe exclusion. Blacklists use the same untraced entry point.
-
-QueryFullProcessImageName with QUERY_LIMITED_INFORMATION is a possible future
-identity lookup improvement, but the old `skip-process` does not establish an
-access-rights failure, cross-bitness failure, buffer failure, or even distinguish
-AltSnap.exe. No alternate access path or application-specific exception is added
-before that evidence. Unreadable identities remain excluded, process blacklists
-are unchanged, and no elevation or foreign-process child search is introduced.
-The extracted shared helper has the same API order, rights and return behavior;
-its optional callback observes stages only. This is a diagnostic-only revision.
 
 Other existing codes: `skip-dwm`, `skip-borderless-overhang`, `too-many`,
 `placement`, `dpi-rect-limits`, `frame-overflow`, `frame-limits`,
@@ -157,6 +147,93 @@ Other existing codes: `skip-dwm`, `skip-borderless-overhang`, `too-many`,
 see [its diagnostics](tests/LINKED_GRID_DIAGNOSTICS.md).
 **Real Windows GUI testing was not performed in the cloud.** Portable adapter
 stubs and cross-compilation do not establish real Windows application behavior.
+
+## VS Code: limited process query
+
+`window_process_name.h` still tries the existing PSAPI sequence first:
+OpenProcess(QUERY_INFORMATION | VM_READ) plus GetModuleFileNameEx; if that open
+fails, OpenProcess(QUERY_INFORMATION); then GetProcessImageFileName if no complete
+module path was read. A successful old lookup never requests the new access
+right or resolves the new API. Only after these paths fail does the shared
+helper resolve QueryFullProcessImageNameA/W from KERNEL32.DLL and request
+OpenProcess(QUERY_LIMITED_INFORMATION), with no inheritance or VM_READ. It uses
+flags=0 for a Win32 path. Missing exports, access denial or failed reads remain
+failures. This is ordinary Windows access checking, not a UIPI/protection bypass.
+See the [Microsoft API contract](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-queryfullprocessimagenamea).
+
+The export matches the existing `_UNICODE` build convention. Buffer capacities
+are TCHAR counts, not byte counts; the returned count excludes the terminator.
+The helper checks size_t-to-DWORD range, nonzero length below capacity, the
+terminator at that length, no embedded NUL and a nonempty basename. Truncated or
+malformed legacy results are also rejected before trying another path. It does
+not grow the caller's buffer or accept partial long paths. Every opened process
+handle is closed, including read failures. A terminal failure clears the output.
+
+All existing GetWindowProgName/FullPath callers, including general blacklists,
+use this same fallback with tracing off. AutoTileGrid reads one validated process
+name and passes it to the unchanged wildcard/whitelist matcher for Processes,
+Windows and Bottommost, with the existing window title/class inputs. It avoids
+the drag cache and independent process rereads for these three lists, so an empty
+or stale process name cannot bypass them. An unreadable identity is now rejected
+before these list matches. AltSnap's current process and AltSnap.exe remain
+excluded. Snaplist and all other eligibility/geometry/rollback gates stay intact.
+
+ApplicationFrameHost keeps the first child from another process policy and the
+host fallback. Both identities can use the limited query. If a child query fails,
+the host is reread because a failed API may have damaged the shared output; if
+the host cannot be read again, the whole lookup fails rather than using child
+bytes as a host name.
+
+Windows GUI validation still needed: test VS Code normal/maximized alone and
+in 1–4-window mixes at equal privileges; repeat with Processes/Windows/Bottommost
+blacklists (including executable-qualified entries and whitelist mode). Confirm
+`process-limited-used` followed by the expected layout or blacklist refusal, and
+repeat with trace off. Test inaccessible/elevated processes without elevating
+AltSnap; an unreadable identity must remain excluded. Test an ApplicationFrameHost
+app with and without an accessible child. Stub/CI success does not prove that a
+real VS Code process permits the limited right or passes later DPI/size gates.
+
+## MobaXterm: owner analysis, no eligibility change
+
+`skip-owner` establishes an owned window; it does not distinguish an application's
+main surface from a dialog. The following are possible observations for a later
+GUI investigation, not an implemented classifier:
+
+| Observation | Why it is insufficient to admit an owned window |
+| --- | --- |
+| GW_OWNER is present | Dialogs and application main surfaces can both be owned; retain the global refusal |
+| WS_POPUP absent/present | A style/type choice, not a main-window or modality guarantee |
+| WS_EX_TOOLWINDOW absent | Dialogs need not be tool windows; presence remains an exclusion |
+| WS_EX_APPWINDOW present | Forces taskbar presentation, not safe resizing or non-dialog status |
+| WS_CAPTION / WS_THICKFRAME / maximized | Resizable dialogs can have ordinary frames and maximize |
+| GA_ROOT equals self | Establishes top-level parentage; owners are a different relation |
+| GA_ROOTOWNER / GetLastActivePopup | Describe ownership/activation chains, not which surface is safe to tile |
+| Enabled window / hidden owner / same process | Modeless dialogs can have these properties; disabled owners can signal modality but their absence proves nothing |
+| Dialog class or modal-frame style absent | Custom dialogs need not use the standard dialog class/style |
+
+A potential future exception would need joint, stable evidence of an independent
+main surface, a known auxiliary owner topology and explicit rejection of modal
+and modeless dialogs. Neither the supplied logs nor static inspection establishes
+that for MobaXterm. No single bit, combination above, executable allowlist or
+Alt-Tab predicate is used as an exception. In particular, hooks.c's IsAltTabAble
+is a presentation selector and is too permissive for automatic movement.
+
+The unconditional GW_OWNER, toolwindow and no-activate exclusions are unchanged.
+No extra owner queries or diagnostics are added to ordinary or traced execution.
+Stubs verify all 16 combinations of owned normal/maximized windows with POPUP,
+APPWINDOW and TOOLWINDOW; all remain excluded before movement/process lookup.
+A real Windows investigation must compare the MobaXterm main surface, normal and
+maximized, with its modal/modeless dialogs, owner visibility/enabled state and
+root-owner relationships across versions. Keep such observations out of the
+AutoTileTrace stream; no names, handles, IDs, paths or raw styles are logged.
+
+Sources: Microsoft [GetWindow](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindow),
+[window styles](https://learn.microsoft.com/en-us/windows/win32/winmsg/window-styles),
+[extended styles](https://learn.microsoft.com/en-us/windows/win32/winmsg/extended-window-styles),
+[GetAncestor](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getancestor),
+[GetLastActivePopup](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getlastactivepopup),
+[IsWindowEnabled](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-iswindowenabled)
+and [owned windows](https://learn.microsoft.com/en-us/windows/win32/winmsg/window-features#owned-windows).
 
 ## Configuration and layout
 

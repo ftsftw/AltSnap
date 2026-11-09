@@ -16,6 +16,8 @@ typedef uintptr_t HDWP;
 typedef intptr_t LPARAM;
 typedef intptr_t LONG_PTR;
 typedef char TCHAR;
+typedef TCHAR *LPTSTR;
+typedef void *HMODULE;
 typedef uintptr_t HANDLE;
 typedef struct { LONG left, top, right, bottom; } RECT;
 typedef struct { LONG x, y; } POINT;
@@ -39,6 +41,12 @@ typedef struct { UINT length, flags, showCmd; POINT ptMinPosition, ptMaxPosition
 #define SW_SHOWNOACTIVATE 4
 #define WS_EX_TOOLWINDOW 4
 #define WS_EX_NOACTIVATE 8
+#define WS_POPUP 64
+#define WS_EX_APPWINDOW 128
+#define PROCESS_QUERY_INFORMATION 1024u
+#define PROCESS_VM_READ 16u
+#define IPTR ((void (*)(void))1)
+#define ERROR_PROC_NOT_FOUND 127u
 #define GW_OWNER 4
 #define SWP_NOACTIVATE 16
 #define SWP_NOZORDER 4
@@ -56,7 +64,8 @@ static struct { HWND hwnd; } LastWin;
 static int g_InMouseMove, g_InFinishMovement;
 static struct { int busy; } linked_queue;
 static struct { int pending; } linked_move;
-static struct { int Processes, Windows, Bottommost, Snaplist; } BlkLst;
+typedef struct { unsigned length; const void *items; unsigned kind; } blacklist_t;
+static struct { blacklist_t Processes, Windows, Bottommost, Snaplist; } BlkLst;
 static LONG generation;
 static unsigned count, captures, positions, restores, batches, clears;
 static int fail_batch, fail_defer, cancel_batch, start_drag, change_preflight;
@@ -66,6 +75,9 @@ static int fail_normalize, fail_max_restore, normalize_effect, normalize_effect_
 static int placement_fail, change_placement_preflight, fail_begin;
 static unsigned frame_reads_after_normalize;
 static unsigned diagnostic_queries, traced_process_calls, enum_repeats;
+static unsigned process_opens, process_closes, limited_queries;
+static HWND process_window;
+static DWORD last_error;
 static char trace_log[16384];
 static size_t trace_used;
 static int wsprintfA(char *buf, const char *fmt, ...)
@@ -88,7 +100,7 @@ static struct FakeWindow {
     int aware, dpi, enabled, visible, owned, zoomed, fullscreen;
     int blacklisted, prop, dwm_fail, min_fail, identity_fail, behavior;
     int cloaked, zero, iconic, borderless, snaplisted, snap_changed;
-    int shell_kind, class_kind, name_fail, altsnap_exe;
+    int shell_kind, class_kind, name_fail, altsnap_exe, limited_only;
     POINT lo, hi;
 } fake[6];
 static RECT targets[6];
@@ -99,7 +111,7 @@ static void SetRect(RECT *r, LONG l, LONG t, LONG rr, LONG b) { *r=(RECT){l,t,rr
 static LONG MovementGeneration(void) { return generation; }
 static LONG_PTR GetWindowLongPtr(HWND w, int which) { return which ? win(w)->exstyle : win(w)->style; }
 static DWORD GetWindowThreadProcessId(HWND w, DWORD *pid)
-{ *pid=win(w)->pid; return win(w)->identity_fail ? 0 : 10; }
+{ process_window=w; *pid=win(w)->pid; return win(w)->identity_fail ? 0 : 10; }
 static DWORD GetCurrentProcessId(void) { return 999; }
 static HWND GetDesktopWindow(void) { return fake[0].shell_kind==1 ? 1 : 100; }
 static HWND GetShellWindow(void) { return fake[0].shell_kind==2 ? 1 : 101; }
@@ -127,20 +139,53 @@ static int isClassName(HWND w, const char *name)
     const char *names[]={"", "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Progman", "WorkerW"};
     return !strcmp(name,names[win(w)->class_kind]);
 }
-static int blacklisted(HWND w, const int *list)
+static int blacklisted(HWND w, const blacklist_t *list)
 {
-    if (list==&BlkLst.Snaplist) return win(w)->snaplisted;
-    return win(w)->blacklisted==(list==&BlkLst.Processes ? 1 : list==&BlkLst.Windows ? 2 : 3);
+    /* General helper/cache must not be used for ATG process/window lists. */
+    assert(list==&BlkLst.Snaplist); return win(w)->snaplisted;
 }
-static int GetWindowProgNameTraced(HWND w, TCHAR *buf, size_t n,
-                                 void (*trace)(const char *, DWORD))
+static int GetWindowText(HWND w, TCHAR *buf, size_t n)
+{ int k=snprintf(buf,n,"window%u",(unsigned)w); assert(k>0 && (size_t)k<n); return k; }
+static int GetClassName(HWND w, TCHAR *buf, size_t n)
+{ (void)w; assert(n>5); strcpy(buf,"Class"); return 5; }
+static int blacklisted_from_names(const blacklist_t *list, const TCHAR *exe,
+                                 const TCHAR *title, const TCHAR *classname)
 {
-    (void)n;
-    if (trace) ++traced_process_calls;
-    strcpy(buf,win(w)->altsnap_exe ? "AltSnap.exe" : "test.exe");
-    if (win(w)->name_fail && trace) trace("process-image-failed",5);
-    return !win(w)->identity_fail && !win(w)->name_fail;
+    unsigned w=0;
+    assert(sscanf(title,"window%u",&w)==1 && !strcmp(classname,"Class"));
+    /* Every list receives the identity validated by the production lookup,
+       including when the old process APIs fail or an unrelated cache is stale. */
+    assert(!strcmp(exe,win(w)->altsnap_exe ? "AltSnap.exe" : win(w)->limited_only ? "Code.exe" : "test.exe"));
+    return win(w)->blacklisted==(int)list->kind;
 }
+static void SetLastError(DWORD error) { ++traced_process_calls; last_error=error; }
+static DWORD GetLastError(void) { return last_error; }
+static HANDLE OpenProcess(DWORD access, BOOL inherit, DWORD pid)
+{
+    assert(!inherit && pid==win(process_window)->pid);
+    if (win(process_window)->name_fail ||
+        (win(process_window)->limited_only && access!=0x1000u)) { last_error=5; return 0; }
+    assert(access==(PROCESS_QUERY_INFORMATION|PROCESS_VM_READ) ||
+           access==PROCESS_QUERY_INFORMATION || access==0x1000u);
+    ++process_opens; return process_window;
+}
+static BOOL CloseHandle(HANDLE proc) { (void)win(proc); ++process_closes; return 1; }
+static DWORD process_name(HANDLE proc, TCHAR *buf, DWORD n)
+{
+    const char *name=win(proc)->altsnap_exe ? "C:\\Apps\\AltSnap.exe" : win(proc)->limited_only ? "C:\\Apps\\Code.exe" : "C:\\Apps\\test.exe";
+    assert(strlen(name)<n); strcpy(buf,name); return (DWORD)strlen(name);
+}
+static DWORD module_name(HANDLE proc, HMODULE module, LPTSTR buf, DWORD n)
+{ assert(!module); return process_name(proc,buf,n); }
+static DWORD image_name(HANDLE proc, LPTSTR buf, DWORD n) { return process_name(proc,buf,n); }
+static BOOL limited_name(HANDLE proc, DWORD flags, LPTSTR buf, DWORD *n)
+{ assert(!flags); ++limited_queries; *n=process_name(proc,buf,*n); return 1; }
+static BOOL EnumChildWindows(HWND w, BOOL (*callback)(HWND, LPARAM), LPARAM lp)
+{ (void)w; (void)callback; (void)lp; assert(0); return 0; } /* No UWP fixture in this model. */
+static size_t PathGetFileNameStart(const TCHAR *name)
+{ const char *p=strrchr(name,'\\'); return p ? (size_t)(p-name+1) : 0; }
+static void PathStripPathL(TCHAR *name)
+{ size_t i=PathGetFileNameStart(name); memmove(name,name+i,strlen(name+i)+1); }
 static int lstrcmpi(const TCHAR *a, const char *b) { return strcmp(a,b); }
 static UINT GetDpiForWindow(HWND w) { return (UINT)win(w)->dpi; }
 static HANDLE dpi_context(HWND w) { return (HANDLE)win(w)->aware; }
@@ -148,10 +193,18 @@ static int dpi_awareness(HANDLE context) { return (int)context; }
 /* Generic function pointer, matching LoadDLLProc's GetProcAddress contract. */
 static void (*LoadDLLProc(const char *dll, const char *name))(void)
 {
-    (void)dll;
+    if (!strcmp(dll,"PSAPI.DLL")) {
+        assert(!strcmp(name,"GetModuleFileNameExA") || !strcmp(name,"GetProcessImageFileNameA"));
+        return !strcmp(name,"GetModuleFileNameExA") ? (void (*)(void))module_name : (void (*)(void))image_name;
+    }
+    if (!strcmp(dll,"KERNEL32.DLL")) {
+        assert(!strcmp(name,"QueryFullProcessImageNameA")); return (void (*)(void))limited_name;
+    }
     return !strcmp(name,"GetWindowDpiAwarenessContext")
         ? (void (*)(void))dpi_context : (void (*)(void))dpi_awareness;
 }
+#include "../window_process_name.h"
+
 static int GetWindowRect(HWND w, RECT *r)
 { if (win(w)->identity_fail) return 0; *r=win(w)->native; return 1; }
 static int DwmGetWindowAttributeL(HWND w, int attr, RECT *r, size_t size)
@@ -288,6 +341,12 @@ static void reset(unsigned n)
     mem00(&state,sizeof state); mem00(&LastWin,sizeof LastWin);
     mem00(&linked_queue,sizeof linked_queue); mem00(&linked_move,sizeof linked_move);
     g_InMouseMove=g_InFinishMovement=0;
+    BlkLst.Processes=(blacklist_t){1,&BlkLst,1};
+    BlkLst.Windows=(blacklist_t){1,&BlkLst,2};
+    BlkLst.Bottommost=(blacklist_t){1,&BlkLst,3};
+    BlkLst.Snaplist=(blacklist_t){1,&BlkLst,4};
+    assert(process_opens==process_closes);
+    process_opens=process_closes=limited_queries=0;
     mem00(fake,sizeof fake);
     for (i=0;i<n;++i) {
         fake[i].native=fake[i].original=(RECT){20+(LONG)i*30,20,400+(LONG)i*30,320};
@@ -527,7 +586,7 @@ static void diagnostic_trace(void)
         if (enabled) {
             assert(strstr(trace_log,reasons[kind]));
             assert(strstr(trace_log,"reason=scan-candidates count=0"));
-            if (kind==28) assert(strstr(trace_log,"reason=process-image-failed error=5"));
+            if (kind==28) assert(strstr(trace_log,"reason=process-open-limited-failed error=5"));
         } else assert(!trace_lines && !diagnostic_queries && !traced_process_calls);
         assert(!strstr(trace_log,"test.exe") && !strstr(trace_log,"AltSnap.exe"));
     }
@@ -544,7 +603,7 @@ static void diagnostic_trace(void)
     }
     /* A process blacklist cannot be bypassed by a failed name lookup. */
     reset(1); fake[0].blacklisted=fake[0].name_fail=1; auto_tile_trace=1; invoke();
-    assert(strstr(trace_log,"skip-blacklist-process") && !traced_process_calls && !positions);
+    assert(strstr(trace_log,"skip-process-unreadable") && traced_process_calls && !positions);
     reset(5); auto_tile_trace=1; invoke(); assert(strstr(trace_log,"reason=too-many"));
     reset(4); auto_tile_trace=1; fake[1].dpi=120; invoke();
     assert(strstr(trace_log,"reason=dpi-rect-limits"));
@@ -552,9 +611,47 @@ static void diagnostic_trace(void)
     assert(strstr(trace_log,"reason=normalized") && strstr(trace_log,"reason=restore-max"));
     assert(!strstr(trace_log,"test.exe"));
 }
+static void limited_fallback_and_owner_safety(void)
+{
+    unsigned kind, enabled;
+    for (enabled=0;enabled<=1;++enabled) for (kind=0;kind<7;++kind) {
+        reset(1); auto_tile_trace=(int)enabled; fake[0].limited_only=1;
+        if (kind>=1 && kind<=3) fake[0].blacklisted=(int)kind;
+        if (kind==4) fake[0].altsnap_exe=1;
+        if (kind==5) fake[0].name_fail=1;
+        /* Empty lists preserve their existing no-match behavior. */
+        if (kind==6) BlkLst.Processes.length=BlkLst.Windows.length=BlkLst.Bottommost.length=0;
+        invoke();
+        assert(process_opens==process_closes);
+        if (kind==0 || kind==6) assert(positions==1 && limited_queries);
+        else { assert(!positions && !normalizes); unchanged(); }
+        if (kind==5) assert(!limited_queries);
+        if (enabled && kind==0) assert(strstr(trace_log,"process-limited-used"));
+        if (!enabled) assert(!trace_lines && !traced_process_calls && !diagnostic_queries);
+        assert(!strstr(trace_log,"Code.exe") && !strstr(trace_log,"C:\\"));
+    }
+    /* Styles/taskbar hints and maximization cannot turn an owned dialog into
+       a proven main window. All combinations retain the unconditional gate. */
+    for (kind=0;kind<16;++kind) {
+        reset(1); fake[0].owned=1;
+        if (kind&1) fake[0].style|=WS_POPUP;
+        if (kind&2) fake[0].exstyle|=WS_EX_APPWINDOW;
+        if (kind&4) fake[0].exstyle|=WS_EX_TOOLWINDOW;
+        if (kind&8) maximize(0);
+        invoke(); unchanged(); assert(!positions && !normalizes && !process_opens);
+    }
+    /* Untraced public wrappers used by existing blacklist callers also fall back. */
+    {
+        TCHAR name[MAX_PATH];
+        reset(1); fake[0].limited_only=1;
+        assert(GetWindowProgName(1,name,ARR_SZ(name)) && !strcmp(name,"Code.exe"));
+        assert(GetWindowProgNameFullPath(1,name,ARR_SZ(name)) && !strcmp(name,"C:\\Apps\\Code.exe"));
+        assert(limited_queries==2 && process_opens==process_closes && !traced_process_calls);
+    }
+}
 int main(void)
 {
-    layouts_and_refusals(); exclusions(); recovery_and_drag(); maximized_and_overhang(); diagnostic_trace();
+    layouts_and_refusals(); exclusions(); recovery_and_drag(); maximized_and_overhang(); diagnostic_trace(); limited_fallback_and_owner_safety();
     puts("auto_tile_grid_win_stubs: 1-4 mixed/maximized layouts, overhang, negative workspace, exclusions, failures, placement recovery, races and opt-in trace passed (no Windows GUI)");
     return 0;
 }
