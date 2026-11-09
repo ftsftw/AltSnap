@@ -31,6 +31,73 @@ static int AutoTileSkip(const char *reason)
     return 0;
 }
 
+/* Relations only: never format handles or discover names. No chain walk,
+   messages, process opens or window mutations. A stable sample is still not an
+   atomic snapshot (including same-process/thread HWND reuse). */
+static const char *AutoTileOwnerRelation(HWND related, HWND hwnd, HWND owner, HWND rootowner)
+{
+    if (!related) return "unknown";
+    if (related == hwnd) return "self";
+    if (related == owner) return "owner";
+    if (related == rootowner) return "rootowner";
+    return "other";
+}
+
+static void AutoTileOwnerTrace(HWND hwnd, HWND owner, DWORD pid,
+                               LONG_PTR style, LONG_PTR exstyle)
+{
+    char line[256];
+    DWORD owner_pid = 0, owner_tid, saved_error;
+    LONG_PTR owner_exstyle;
+    HWND root, rootowner, popup, current;
+    int visible, enabled, window_enabled, style_known, stable = 0;
+    const char *link = "stable", *process;
+    if (!auto_tile_trace) return;
+    saved_error = GetLastError();
+    if (!IsWindow(hwnd)) { link = "window-gone"; goto state; }
+    if (!IsWindow(owner)) { link = "owner-gone"; goto state; }
+    owner_tid = GetWindowThreadProcessId(owner, &owner_pid);
+    process = !pid || !owner_tid || !owner_pid ? "unknown"
+        : pid == owner_pid ? "same" : "different";
+    visible = IsWindowVisible(owner);
+    enabled = IsWindowEnabled(owner);
+    window_enabled = IsWindowEnabled(hwnd);
+    SetLastError(0);
+    owner_exstyle = GetWindowLongPtr(owner, GWL_EXSTYLE);
+    style_known = owner_exstyle != 0 || GetLastError() == 0;
+    root = GetAncestor(hwnd, GA_ROOT);
+    rootowner = GetAncestor(hwnd, GA_ROOTOWNER);
+    popup = rootowner ? GetLastActivePopup(rootowner) : (HWND)0;
+    current = GetWindow(hwnd, GW_OWNER);
+    if (!IsWindow(hwnd)) link = "window-gone";
+    else if (!IsWindow(owner)) link = "owner-gone";
+    else if (!current) link = "cleared";
+    else if (current != owner) link = "changed";
+    else stable = 1;
+state:
+    wsprintfA(line, "AltSnap.ATG reason=owner-state link=%s\n", link);
+    OutputDebugStringA(line);
+    /* Discard observations when a race was detected. Refusal is unconditional. */
+    if (stable) {
+        wsprintfA(line, "AltSnap.ATG reason=owner-flags process=%s visible=%s enabled=%s tool=%s app=%s noactivate=%s\n",
+            process, visible ? "yes" : "no", enabled ? "yes" : "no",
+            !style_known ? "unknown" : owner_exstyle & WS_EX_TOOLWINDOW ? "yes" : "no",
+            !style_known ? "unknown" : owner_exstyle & WS_EX_APPWINDOW ? "yes" : "no",
+            !style_known ? "unknown" : owner_exstyle & WS_EX_NOACTIVATE ? "yes" : "no");
+        OutputDebugStringA(line);
+        wsprintfA(line, "AltSnap.ATG reason=owned-flags popup=%s app=%s enabled=%s\n",
+            style & WS_POPUP ? "yes" : "no", exstyle & WS_EX_APPWINDOW ? "yes" : "no",
+            window_enabled ? "yes" : "no");
+        OutputDebugStringA(line);
+        wsprintfA(line, "AltSnap.ATG reason=owner-relations root=%s rootowner=%s lastpopup=%s\n",
+            AutoTileOwnerRelation(root, hwnd, owner, rootowner),
+            AutoTileOwnerRelation(rootowner, hwnd, owner, rootowner),
+            AutoTileOwnerRelation(popup, hwnd, owner, rootowner));
+        OutputDebugStringA(line);
+    }
+    SetLastError(saved_error);
+}
+
 static void AutoTileProcessTrace(const char *stage, DWORD error)
 {
     char line[128];
@@ -113,6 +180,7 @@ static int AutoTileBlacklisted(HWND hwnd, const blacklist_t *list, const TCHAR *
 static int AutoTileEligible(HWND hwnd, const ATGSnapshot *s, unsigned *quiet)
 {
     DWORD pid;
+    HWND owner;
     TCHAR exe[MAX_PATH];
     LONG_PTR style = GetWindowLongPtr(hwnd, GWL_STYLE);
     LONG_PTR exstyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
@@ -130,7 +198,10 @@ static int AutoTileEligible(HWND hwnd, const ATGSnapshot *s, unsigned *quiet)
         return AutoTileSkip("skip-maximized-no-caption");
     if (exstyle & WS_EX_TOOLWINDOW) return AutoTileSkip("skip-toolwindow");
     if (exstyle & WS_EX_NOACTIVATE) return AutoTileSkip("skip-noactivate");
-    if (GetWindow(hwnd, GW_OWNER)) return AutoTileSkip("skip-owner");
+    if ((owner = GetWindow(hwnd, GW_OWNER))) {
+        if (auto_tile_trace) AutoTileOwnerTrace(hwnd, owner, pid, style, exstyle);
+        return AutoTileSkip("skip-owner");
+    }
     if (!IsWindowEnabled(hwnd)) return AutoTileSkip("skip-not-enabled");
     if (isClassName(hwnd, TEXT("Shell_TrayWnd"))) return AutoTileSkip("skip-taskbar");
     if (isClassName(hwnd, TEXT("Shell_SecondaryTrayWnd"))) return AutoTileSkip("skip-secondary-taskbar");

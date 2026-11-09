@@ -46,13 +46,15 @@ restart to disable its registration.
 
 ## Eligibility diagnostics (next Windows test)
 
-The supplied Windows 10 GUI test confirms Chrome, OpenCode and Windows Terminal,
-including maximized 1–4-window tiling followed by Linked Grid Resize. VS Code
-now has a specific process lookup failure: both legacy OpenProcess attempts
-returned access denied (`error=5`), followed by `skip-process-unreadable`.
-MobaXterm returned `skip-owner` both normal and maximized. The limited-query
-fallback below addresses the VS Code lookup case in stubs; a new Windows GUI
-test is still required. MobaXterm remains excluded; no owner exception is added.
+The supplied Windows 10 results confirm AutoTileGrid for Chrome, VS Code,
+OpenCode and Windows Terminal, including 2×2 and subsequent Linked Grid Resize.
+VS Code's earlier elevated instance blocked tiling after process lookup; running
+it without elevation worked. This is not evidence that process lookup bypasses
+Windows privileges. Portable MobaXterm returns `skip-owner` both normal and
+maximized. With it open, three ordinary windows tile in 1+2 while MobaXterm stays
+in place. Its earlier Linked Grid Resize minimum-size/guarded rollback test also
+passed; that does not establish AutoTileGrid eligibility. The owner diagnostics
+below are new and have not yet been tested against the real MobaXterm GUI.
 
 Set `AutoTileTrace=1` in the existing `[General]` section and restart AltSnap.
 Capture Win32 debugger output with DebugView, filter **AltSnap.ATG**, clear the
@@ -69,9 +71,10 @@ output through the final outcome. Test separately:
 Record app/state/monitor/scaling/privilege level manually, outside the trace.
 Disable `AutoTileTrace` afterwards. Do not elevate AltSnap to force participation.
 No trace files, window identifiers, titles, executable names, paths, PID/TID,
-geometry or content are emitted. Only fixed codes, counts/participant indices
-and numeric Win32 errors are written. No extra diagnostic window/process queries
-or GetLastError/SetLastError calls run with `AutoTileTrace=0`.
+geometry or content are emitted. Only fixed codes, categorical owner observations,
+counts/participant indices and existing numeric Win32 process-query errors are
+written. No extra diagnostic window/process queries or GetLastError/SetLastError
+calls run with `AutoTileTrace=0`.
 
 Each capture is bracketed by `scan-begin count=0` and `scan-candidates count=N`.
 Monitor/invisible/cloaked/zero-size/minimized exclusions are aggregated into at
@@ -195,37 +198,120 @@ real VS Code process permits the limited right or passes later DPI/size gates.
 
 ## MobaXterm: owner analysis, no eligibility change
 
-`skip-owner` establishes an owned window; it does not distinguish an application's
-main surface from a dialog. The following are possible observations for a later
-GUI investigation, not an implemented classifier:
+`skip-owner` retains its unconditional refusal. Only when `AutoTileTrace=1`,
+an owner rejection is preceded by at most four contiguous diagnostic lines,
+all matching the existing **AltSnap.ATG** DebugView filter. There are no handles,
+PID/TID, executable names, titles, paths, class names, geometry or raw style/error
+values in these new lines. They describe the current rejected candidate, not a
+persistent window identity. Multiple captures can repeat the block.
 
-| Observation | Why it is insufficient to admit an owned window |
+| Fixed reason | Fields and exact categories |
 | --- | --- |
-| GW_OWNER is present | Dialogs and application main surfaces can both be owned; retain the global refusal |
-| WS_POPUP absent/present | A style/type choice, not a main-window or modality guarantee |
-| WS_EX_TOOLWINDOW absent | Dialogs need not be tool windows; presence remains an exclusion |
-| WS_EX_APPWINDOW present | Forces taskbar presentation, not safe resizing or non-dialog status |
-| WS_CAPTION / WS_THICKFRAME / maximized | Resizable dialogs can have ordinary frames and maximize |
-| GA_ROOT equals self | Establishes top-level parentage; owners are a different relation |
-| GA_ROOTOWNER / GetLastActivePopup | Describe ownership/activation chains, not which surface is safe to tile |
-| Enabled window / hidden owner / same process | Modeless dialogs can have these properties; disabled owners can signal modality but their absence proves nothing |
-| Dialog class or modal-frame style absent | Custom dialogs need not use the standard dialog class/style |
+| `owner-state` | `link=stable`, `owner-gone`, `window-gone`, `cleared`, or `changed` |
+| `owner-flags` | `process=same/different/unknown`; owner `visible=yes/no`, `enabled=yes/no`; `tool`, `app`, `noactivate` each `yes/no/unknown` |
+| `owned-flags` | Rejected candidate's `popup=yes/no`, `app=yes/no`, `enabled=yes/no` |
+| `owner-relations` | `root`, `rootowner`, `lastpopup` each `self/owner/rootowner/other/unknown` as applicable |
 
-A potential future exception would need joint, stable evidence of an independent
-main surface, a known auxiliary owner topology and explicit rejection of modal
-and modeless dialogs. Neither the supplied logs nor static inspection establishes
-that for MobaXterm. No single bit, combination above, executable allowlist or
-Alt-Tab predicate is used as an exception. In particular, hooks.c's IsAltTabAble
-is a presentation selector and is too permissive for automatic movement.
+`owner-state` checks candidate/owner existence before observation, then rechecks
+existence and the original GW_OWNER link after observation. `stable` means those
+checks saw the same link; `cleared` means the link became null while both handles
+still passed IsWindow; `changed` means another non-null owner was observed.
+`owner-gone`/`window-gone` mean IsWindow failed for the original owner/candidate,
+including failure at the initial check. If several conditions change, candidate
+absence takes precedence over owner absence, then cleared/changed link. This
+cannot distinguish destruction from every other invalid-handle condition.
+Only `owner-state` is emitted on detected instability, followed by `skip-owner`;
+partial feature observations are discarded and exclusion is never reconsidered.
 
-The unconditional GW_OWNER, toolwindow and no-activate exclusions are unchanged.
-No extra owner queries or diagnostics are added to ordinary or traced execution.
-Stubs verify all 16 combinations of owned normal/maximized windows with POPUP,
-APPWINDOW and TOOLWINDOW; all remain excluded before movement/process lookup.
-A real Windows investigation must compare the MobaXterm main surface, normal and
-maximized, with its modal/modeless dialogs, owner visibility/enabled state and
-root-owner relationships across versions. Keep such observations out of the
-AutoTileTrace stream; no names, handles, IDs, paths or raw styles are logged.
+`process` compares the candidate PID already obtained by eligibility with one
+GetWindowThreadProcessId(owner) result; failed or zero identities are `unknown`.
+It never opens either process or performs executable lookup. Owner style bits
+come from one GetWindowLongPtr(GWL_EXSTYLE); a failed zero-valued read produces
+`unknown` for all three bits, while a successful zero means all three are `no`.
+The thread's last-error value is restored after diagnostics. `visible` means
+IsWindowVisible, not uncloaked, unobscured or user-perceived visibility. Candidate
+popup/app bits use eligibility's existing style reads; candidate enabled and owner
+visibility/enabled state are separate read-only observations.
+
+`root` is GetAncestor(candidate, GA_ROOT), `rootowner` is GA_ROOTOWNER, and
+`lastpopup` is GetLastActivePopup(rootowner), called once only if rootowner is
+non-null. There is no ownership/popup chain traversal. Relations compare handles
+only in memory, with precedence `self`, `owner`, `rootowner`, `other`; a null
+result is `unknown`, not proof of an absent dialog. `rootowner=rootowner` means a
+non-null ancestor different from both candidate and immediate owner (a deeper
+chain). Last-active popup is activation history, not a complete dialog list or a
+modality test. These APIs send no diagnostic messages, do not activate/resize or
+otherwise modify windows, and require no background process, worker or elevation.
+With tracing off the original single GW_OWNER eligibility read remains, and none
+of these extra queries, formatting, error-state operations or output runs.
+Earlier exclusions such as tool/no-activate windows still short-circuit before
+GW_OWNER; they do not produce an owner block.
+
+These are best-effort sequential samples, not atomic snapshots. Owner flags,
+process identity and root/popup relations can change between calls even when the
+link recheck is stable. Same-process/thread HWND reuse or a link changing away
+and back can escape detection. Root/popup handles are only compared, not queried
+for additional properties. Do not use these observations as an eligibility rule.
+
+| Observation | Why it cannot prove an independent main window |
+| --- | --- |
+| Same process, hidden owner, enabled candidate | Also possible for modeless dialogs and toolkit helper owners |
+| Disabled owner | Compatible with modality, but not a complete modal-dialog test |
+| WS_POPUP absent/present | A window style choice, not a main-window guarantee |
+| WS_EX_TOOLWINDOW absent | Dialogs need not be tool windows |
+| WS_EX_APPWINDOW present | Taskbar presentation, not safe resizing or non-dialog status |
+| Caption, thick frame, maximized state | Resizable dialogs can share all of these |
+| GA_ROOT equals self | Top-level parentage; ownership is a separate relation |
+| GA_ROOTOWNER / last-active popup relations | Ownership/activation history, not a reliable dialog classifier |
+| Modal-frame style or standard dialog class absent | Custom dialogs need neither; collecting class names is unnecessary here |
+
+A future exception would require stable joint evidence across normal/maximized
+main windows and modal/modeless/custom dialogs, including disabled owners and
+activation changes. These observations may reveal an auxiliary hidden-owner
+pattern worth investigating; they cannot establish a general safe classifier.
+No classifier, MobaXterm/EXE allowlist or Alt-Tab exception is implemented.
+hooks.c's IsAltTabAble is a presentation selector, too permissive for automatic
+movement. Process lookup (including the VS Code fallback), all blacklists,
+Linked Grid Resize, min/max checks and recovery rules are unchanged.
+
+Portable packaging **could** indirectly affect topology if its launcher or UI
+initialization creates a hidden helper owner or a different process relationship.
+Portability itself is not a Win32 owner property and supplies no evidence for that
+hypothesis. Static AltSnap inspection and stubs cannot establish whether portable
+mode causes MobaXterm's owner. A controlled real Windows comparison of the same
+MobaXterm version/configuration in portable and installed modes, normal/maximized
+and with dialogs, is needed; no portable-specific cause or support is claimed.
+
+### Short Windows 10 portable MobaXterm check
+
+1. Use the portable ZIP for this commit as described above, at ordinary privileges.
+   Set `[KBShortcuts] AutoTileGrid=839` and `[General] AutoTileTrace=1` in the test
+   INI; restart AltSnap. In DebugView filter `AltSnap.ATG`. Keep app/version,
+   privilege, scaling, monitor and the test case in separate manual notes.
+2. Minimize other eligible apps. Keep portable MobaXterm **normal**, clear DebugView,
+   put the cursor on its monitor and press Ctrl+Alt+G once. Retain the complete
+   scan/final output including the owner block and `skip-owner`; verify no movement.
+3. **Maximize** MobaXterm, clear capture and repeat once. Verify it stays maximized
+   in place. Compare categorical owner observations with the normal case.
+4. Return it to normal, open a modal MobaXterm settings/confirmation dialog, clear
+   capture and invoke once. Record whether the main surface is disabled and how
+   the owner/popup block differs. Verify neither main surface nor dialog moves.
+   Close the dialog and repeat with a modeless dialog if the tested version has
+   one. A dialog may hit an earlier gate and have no owner block; record that
+   limit instead of treating a missing block as evidence of no dialog.
+5. Close dialogs. On that monitor open exactly three ordinary windows (for example
+   Chrome, VS Code without elevation and Windows Terminal), plus MobaXterm. Clear
+   capture and invoke once with MobaXterm normal, then again maximized. Expect
+   `scan-candidates count=3`, a final successful three-window **1+2** layout, and
+   MobaXterm still excluded/in place. The three windows use the whole work area:
+   **they may overlap/cover MobaXterm**. Exclusion does not reserve space for it.
+6. Repeat the mixed check with `AutoTileTrace=0` after restarting AltSnap. Expect
+   the same exclusions/layout and no `AltSnap.ATG` output; leave tracing disabled.
+
+Retain full filtered output, including repeated captures and terminal refusal
+codes, rather than just the owner block. No new Windows GUI run was performed in
+the Linux environment. Until that run, the new diagnostics and any distinction
+between owned main surfaces and dialogs remain unverified on actual MobaXterm.
 
 Sources: Microsoft [GetWindow](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindow),
 [window styles](https://learn.microsoft.com/en-us/windows/win32/winmsg/window-styles),
@@ -346,7 +432,8 @@ stealing focus back or manipulating Z-order. A failed operation involving
 maximized windows may change focus/Z-order or leave a partial restoration if an
 application refuses recovery or a new user action cancels it. Successful forward
 tilings request no activation; applications can still react to sizing themselves.
-This needs a real Chrome/Edge Windows 10 check before claiming GUI stability.
+The successful user-reported tilings do not establish every failure-recovery
+focus/Z-order scenario; those still need real Windows checks.
 See the Microsoft [ShowWindow command contract](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-showwindow)
 and [WINDOWPLACEMENT coordinate contract](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-windowplacement).
 
@@ -390,7 +477,13 @@ restore placements, changed enumeration order, normalization and placement API
 failures, infeasible limits after restore, failed recovery APIs, DPI/monitor/show
 state changes, cancellation and opt-in trace output. These model tests
 cannot validate real DWM, UIPI or application message handling.
-ASan/UBSan and MinGW x64 test compilation are supported by tests/Makefile.
+The new owner tests exhaust 2,048 candidate/owner/style/process/state/show-state
+combinations with tracing both off and on (4,096 cases), plus link races,
+root/popup relations, unknown styles and mixed three-window layouts, blacklist,
+infeasible-plan/five-participant refusals and rollback. An exact fixed token
+vocabulary checks owner log privacy. Trace-off tests count extra queries and
+error-state operations. ASan/UBSan and MinGW x64 test compilation are supported
+by tests/Makefile.
 
 Full Windows x64 application build (no Windows GUI execution):
 
@@ -399,7 +492,8 @@ make -f MakefileX64 -j2 \
   CC=x86_64-w64-mingw32-gcc-win32 WR=x86_64-w64-mingw32-windres
 ```
 
-Real Windows GUI behavior remains **unverified** until the user tests it.
+The user-reported Windows 10 results above are established observations; the
+new owner diagnostics and remaining GUI scenarios still require real testing.
 Portable tests do not exercise enumeration, UIPI, DWM, DPI message marshalling,
 DeferWindowPos or recovery against real applications. On Windows, verify:
 

@@ -48,6 +48,8 @@ typedef struct { UINT length, flags, showCmd; POINT ptMinPosition, ptMaxPosition
 #define IPTR ((void (*)(void))1)
 #define ERROR_PROC_NOT_FOUND 127u
 #define GW_OWNER 4
+#define GA_ROOT 2
+#define GA_ROOTOWNER 3
 #define SWP_NOACTIVATE 16
 #define SWP_NOZORDER 4
 #define SWP_NOOWNERZORDER 512
@@ -78,6 +80,9 @@ static unsigned diagnostic_queries, traced_process_calls, enum_repeats;
 static unsigned process_opens, process_closes, limited_queries;
 static HWND process_window;
 static DWORD last_error;
+static unsigned owner_queries, owner_link_queries;
+static int owner_exists, owned_exists, owner_race, owner_style_fail;
+static HWND relation_root, relation_rootowner, relation_popup;
 static char trace_log[16384];
 static size_t trace_used;
 static int wsprintfA(char *buf, const char *fmt, ...)
@@ -102,20 +107,45 @@ static struct FakeWindow {
     int cloaked, zero, iconic, borderless, snaplisted, snap_changed;
     int shell_kind, class_kind, name_fail, altsnap_exe, limited_only;
     POINT lo, hi;
-} fake[6];
+} fake[6], fake_owner;
 static RECT targets[6];
 static unsigned batch_mask;
-static struct FakeWindow *win(HWND w) { assert(w>=1 && w<=count); return &fake[w-1]; }
+static struct FakeWindow *win(HWND w) {
+    if (w==102) { ++owner_queries; return &fake_owner; }
+    assert(w>=1 && w<=count && w<=ARR_SZ(fake)); return &fake[w-1];
+}
 static BOOL EqualRect(const RECT *a, const RECT *b) { return !memcmp(a,b,sizeof *a); }
 static void SetRect(RECT *r, LONG l, LONG t, LONG rr, LONG b) { *r=(RECT){l,t,rr,b}; }
 static LONG MovementGeneration(void) { return generation; }
-static LONG_PTR GetWindowLongPtr(HWND w, int which) { return which ? win(w)->exstyle : win(w)->style; }
+static LONG_PTR GetWindowLongPtr(HWND w, int which) {
+    if (w==102 && owner_style_fail) { ++owner_queries; last_error=5; return 0; }
+    return which ? win(w)->exstyle : win(w)->style;
+}
 static DWORD GetWindowThreadProcessId(HWND w, DWORD *pid)
 { process_window=w; *pid=win(w)->pid; return win(w)->identity_fail ? 0 : 10; }
 static DWORD GetCurrentProcessId(void) { return 999; }
 static HWND GetDesktopWindow(void) { return fake[0].shell_kind==1 ? 1 : 100; }
 static HWND GetShellWindow(void) { return fake[0].shell_kind==2 ? 1 : 101; }
-static HWND GetWindow(HWND w, int which) { (void)which; return win(w)->owned ? 102 : 0; }
+static HWND GetWindow(HWND w, int which) {
+    assert(which==GW_OWNER); ++owner_link_queries;
+    return win(w)->owned==2 ? 103 : win(w)->owned ? 102 : 0;
+}
+static BOOL IsWindow(HWND w) {
+    ++owner_queries;
+    return w==102 ? owner_exists : owned_exists;
+}
+static HWND GetAncestor(HWND w, UINT which) {
+    (void)w; ++owner_queries; assert(which==GA_ROOT || which==GA_ROOTOWNER);
+    return which==GA_ROOT ? relation_root : relation_rootowner;
+}
+static HWND GetLastActivePopup(HWND w) {
+    assert(w==relation_rootowner); ++owner_queries;
+    if (owner_race==1) owner_exists=0;
+    if (owner_race==2) fake[0].owned=2;
+    if (owner_race==3) fake[0].owned=0;
+    if (owner_race==4) owned_exists=0;
+    return relation_popup;
+}
 static int IsWindowEnabled(HWND w) { return win(w)->enabled; }
 static int IsWindowVisible(HWND w) { ++diagnostic_queries; return win(w)->visible; }
 static int IsWindowCloaked(HWND w) { ++diagnostic_queries; return win(w)->cloaked; }
@@ -335,6 +365,10 @@ static void reset(unsigned n)
     normalizes=max_restores=trace_lines=frame_reads_after_normalize=0;
     trace_used=0; trace_log[0]=0; auto_tile_trace=0;
     diagnostic_queries=traced_process_calls=0; enum_repeats=1;
+    owner_queries=owner_link_queries=0;
+    owner_exists=owned_exists=1; owner_race=owner_style_fail=0;
+    relation_root=relation_popup=1; relation_rootowner=102;
+    mem00(&fake_owner,sizeof fake_owner); fake_owner.pid=1;
     fail_normalize=fail_max_restore=normalize_effect=normalize_effect_at=0;
     placement_fail=change_placement_preflight=fail_begin=0;
     monitor_rect=(RECT){0,0,1200,1000}; work_rect=(RECT){0,0,1200,960};
@@ -649,9 +683,154 @@ static void limited_fallback_and_owner_safety(void)
         assert(limited_queries==2 && process_opens==process_closes && !traced_process_calls);
     }
 }
+
+/* Exact token vocabulary, rather than only checking for a few known secrets.
+   Any new owner diagnostic field/value must be explicitly reviewed here. */
+static void owner_log_safe(void)
+{
+    const char *p=trace_log;
+    const char *const allowed[]={
+        "AltSnap.ATG", "reason=owner-state", "reason=owner-flags", "reason=owned-flags", "reason=owner-relations",
+        "link=stable", "link=owner-gone", "link=window-gone", "link=changed", "link=cleared",
+        "process=same", "process=different", "process=unknown",
+        "visible=yes", "visible=no", "enabled=yes", "enabled=no",
+        "tool=yes", "tool=no", "tool=unknown", "app=yes", "app=no", "app=unknown",
+        "noactivate=yes", "noactivate=no", "noactivate=unknown", "popup=yes", "popup=no",
+        "root=self", "root=owner", "root=other", "root=rootowner", "root=unknown",
+        "rootowner=self", "rootowner=owner", "rootowner=rootowner", "rootowner=unknown",
+        "lastpopup=self", "lastpopup=owner", "lastpopup=rootowner", "lastpopup=other", "lastpopup=unknown"
+    };
+    while (*p) {
+        const char *end=strchr(p,'\n');
+        char line[256], *token;
+        assert(end);
+        if (!strncmp(p,"AltSnap.ATG reason=owner",23)) {
+            size_t n=(size_t)(end-p); assert(n<sizeof line);
+            memcpy(line,p,n); line[n]=0;
+            for (token=strtok(line," ");token;token=strtok(NULL," ")) {
+                unsigned i;
+                for (i=0;i<ARR_SZ(allowed) && strcmp(token,allowed[i]);++i) { }
+                assert(i<ARR_SZ(allowed));
+            }
+        }
+        p=end+1;
+    }
+}
+
+static void owner_topology_trace(void)
+{
+    unsigned enabled, flags, owner_flags, process, state_bits, maximized, kind;
+    ATGSnapshot s;
+    mem00(&s,sizeof s); s.monitor=1;
+    for (enabled=0;enabled<=1;++enabled)
+    for (flags=0;flags<8;++flags) /* Candidate popup/app/tool, including earlier refusal. */
+    for (owner_flags=0;owner_flags<8;++owner_flags)
+    for (process=0;process<4;++process)
+    for (state_bits=0;state_bits<4;++state_bits)
+    for (maximized=0;maximized<=1;++maximized) {
+        reset(1); auto_tile_trace=(int)enabled; fake[0].owned=1;
+        if (flags&1) fake[0].style|=WS_POPUP;
+        if (flags&2) fake[0].exstyle|=WS_EX_APPWINDOW;
+        if (flags&4) fake[0].exstyle|=WS_EX_TOOLWINDOW;
+        if (maximized) maximize(0);
+        fake_owner.exstyle=(owner_flags&1 ? WS_EX_TOOLWINDOW : 0)
+            | (owner_flags&2 ? WS_EX_APPWINDOW : 0) | (owner_flags&4 ? WS_EX_NOACTIVATE : 0);
+        fake_owner.visible=!!(state_bits&1); fake_owner.enabled=!!(state_bits&2);
+        if (process==1) fake_owner.pid=7654321;
+        if (process==2) fake_owner.identity_fail=1;
+        if (process==3) fake_owner.pid=0;
+        last_error=1234567;
+        assert(!AutoTileEligible(1,&s,NULL)); unchanged();
+        assert(!positions && !normalizes && !process_opens && !limited_queries);
+        assert(last_error==1234567);
+        if (!enabled) {
+            assert(!trace_lines && !owner_queries && !diagnostic_queries && !traced_process_calls);
+            assert(owner_link_queries==((flags&4) ? 0u : 1u));
+        } else if (flags&4) {
+            assert(!owner_queries && !owner_link_queries && !strstr(trace_log,"reason=owner-"));
+        } else {
+            char expected[128];
+            assert(trace_lines==5 && owner_queries<=16 && owner_link_queries==2);
+            snprintf(expected,sizeof expected,"process=%s visible=%s enabled=%s tool=%s app=%s noactivate=%s",
+                process>=2 ? "unknown" : process==1 ? "different" : "same",
+                state_bits&1 ? "yes" : "no", state_bits&2 ? "yes" : "no",
+                owner_flags&1 ? "yes" : "no", owner_flags&2 ? "yes" : "no", owner_flags&4 ? "yes" : "no");
+            assert(strstr(trace_log,expected));
+            snprintf(expected,sizeof expected,"reason=owned-flags popup=%s app=%s enabled=yes",
+                flags&1 ? "yes" : "no", flags&2 ? "yes" : "no");
+            assert(strstr(trace_log,expected)); owner_log_safe();
+        }
+    }
+    /* Races before and during observation cannot undo the initial refusal. */
+    for (enabled=0;enabled<=1;++enabled) for (kind=0;kind<6;++kind) {
+        const char *links[]={"owner-gone","window-gone","owner-gone","changed","cleared","window-gone"};
+        reset(1); auto_tile_trace=(int)enabled; fake[0].owned=1;
+        if (kind==0) owner_exists=0;
+        else if (kind==1) owned_exists=0;
+        else owner_race=(int)kind-1;
+        assert(!AutoTileEligible(1,&s,NULL));
+        if (enabled) {
+            assert(strstr(trace_log,links[kind]) && strstr(trace_log,"reason=skip-owner"));
+            assert(trace_lines==2 && !strstr(trace_log,"reason=owner-flags"));
+        } else assert(!trace_lines && !owner_queries && !diagnostic_queries && !traced_process_calls
+                      && owner_link_queries==1);
+        assert(!process_opens && !positions && !normalizes); owner_log_safe();
+    }
+    for (kind=0;kind<7;++kind) {
+        const char *relations[]={
+            "root=self rootowner=owner lastpopup=self",
+            "root=other rootowner=rootowner lastpopup=rootowner",
+            "root=owner rootowner=owner lastpopup=owner",
+            "root=self rootowner=self lastpopup=other",
+            "root=unknown rootowner=unknown lastpopup=unknown",
+            "root=self rootowner=owner lastpopup=unknown",
+            "root=self rootowner=owner lastpopup=self"
+        };
+        reset(1); auto_tile_trace=1; fake[0].owned=1;
+        if (kind==1) { relation_root=104; relation_rootowner=105; relation_popup=105; }
+        if (kind==2) relation_root=relation_popup=102;
+        if (kind==3) { relation_rootowner=1; relation_popup=104; }
+        if (kind==4) relation_root=relation_rootowner=relation_popup=0;
+        if (kind==5) relation_popup=0;
+        if (kind==6) { owner_style_fail=1; fake[0].enabled=0; }
+        assert(!AutoTileEligible(1,&s,NULL));
+        assert(strstr(trace_log,relations[kind]));
+        if (kind==6) assert(strstr(trace_log,"tool=unknown app=unknown noactivate=unknown")
+                            && strstr(trace_log,"reason=owned-flags popup=no app=no enabled=no"));
+        owner_log_safe();
+    }
+    /* MobaXterm-like owned surface + three ordinary applications: same layout,
+       blacklists, infeasible plans and rollback with diagnostics on and off. */
+    for (enabled=0;enabled<=1;++enabled) for (maximized=0;maximized<=1;++maximized)
+    for (kind=0;kind<5;++kind) {
+        unsigned i, full_height=0, half_height=0;
+        reset(kind==4 ? 6 : 4); auto_tile_trace=(int)enabled; fake[count-1].owned=1;
+        if (maximized) maximize(count-1);
+        if (kind==1) fake[1].behavior=1;
+        if (kind==2) fake[1].blacklisted=1;
+        if (kind==3) fake[1].lo.x=1800;
+        invoke(); assert(EqualRect(&fake[count-1].native,&fake[count-1].original));
+        assert(AutoTileSamePlacement(&fake[count-1].placement,&fake[count-1].original_placement));
+        assert(!normalizes && !max_restores);
+        if (kind==0) {
+            assert(positions==3 && clears==3 && batch_mask==7);
+            for (i=1;i<=3;++i) {
+                RECT r; DwmGetWindowAttributeL(i,9,&r,sizeof r);
+                assert(r.right-r.left==600);
+                full_height+=r.bottom-r.top==960; half_height+=r.bottom-r.top==480;
+            }
+            assert(full_height==1 && half_height==2);
+        } else if (kind==1) { unchanged(); assert(restores==3 && !clears); }
+        else if (kind==2) { assert(positions==2 && clears==2); assert(EqualRect(&fake[1].native,&fake[1].original)); }
+        else { unchanged(); assert(!positions && !clears); }
+        if (!enabled) assert(!trace_lines && !owner_queries && !diagnostic_queries && !traced_process_calls);
+        else owner_log_safe();
+    }
+}
 int main(void)
 {
     layouts_and_refusals(); exclusions(); recovery_and_drag(); maximized_and_overhang(); diagnostic_trace(); limited_fallback_and_owner_safety();
-    puts("auto_tile_grid_win_stubs: 1-4 mixed/maximized layouts, overhang, negative workspace, exclusions, failures, placement recovery, races and opt-in trace passed (no Windows GUI)");
+    owner_topology_trace();
+    puts("auto_tile_grid_win_stubs: layouts, recovery, exclusions, owner topology/races, 4096 trace on/off combinations and fixed log vocabulary passed (no Windows GUI)");
     return 0;
 }
