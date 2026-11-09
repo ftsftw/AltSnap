@@ -1,19 +1,22 @@
-name: Linked Grid Windows x64 test ZIP
+name: Grid Windows x64 test ZIP
 
 on:
   workflow_dispatch:
   push:
     branches:
       - feat/linked-grid-resize
+      - feat/auto-tile-grid
 
 permissions:
   contents: read
 
 jobs:
   build:
-    if: github.ref == 'refs/heads/feat/linked-grid-resize'
+    if: github.ref == 'refs/heads/feat/linked-grid-resize' || github.ref == 'refs/heads/feat/auto-tile-grid'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      PACKAGE_NAME: ${{ github.ref == 'refs/heads/feat/auto-tile-grid' && 'AltSnap-auto-tile-win64-test' || 'AltSnap-linked-grid-win64-test' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,7 +40,7 @@ jobs:
         run: tests/package_linked_grid_win64.sh work/portable
       - uses: actions/upload-artifact@v4
         with:
-          name: AltSnap-linked-grid-win64-test
-          path: work/portable/AltSnap-linked-grid-win64-test.zip
+          name: ${{ env.PACKAGE_NAME }}
+          path: work/portable/${{ env.PACKAGE_NAME }}.zip
           if-no-files-found: error
           retention-days: 7

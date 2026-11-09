@@ -9,6 +9,10 @@ make -C tests test
 This builds `linked_grid.c`, the owner-queue policy in `linked_grid_queue.h`,
 the recovery policy, `auto_tile_grid.c` and their framework-free C99 tests. It neither
 builds nor starts AltSnap. Outputs go to ignored `work/linked-grid-tests/`.
+It also runs the production AutoTileGrid adapter against deterministic Win32
+stubs: eligible/other-monitor windows, repeated layouts, DPI and size refusals,
+preflight changes, failed batches, +107 px application corrections, guarded
+rollback and active/pending drag exclusion. This does not run Windows GUI code.
 Warnings are errors. To check address and undefined behaviour sanitizers:
 
 ```

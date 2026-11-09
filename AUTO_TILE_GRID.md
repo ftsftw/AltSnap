@@ -1,5 +1,55 @@
 # AutoTileGrid (experimental MVP)
 
+## Windows 10 first test
+
+1. Open [GitHub Actions](https://github.com/ftsftw/AltSnap/actions/workflows/linked-grid-win64-test.yml),
+   select a successful **Grid Windows x64 test ZIP** run for
+   **feat/auto-tile-grid**, and check its commit SHA. Under **Artifacts**, download
+   **AltSnap-auto-tile-win64-test** (GitHub sign-in is normally required).
+   Unpack the artifact, then the contained portable ZIP into a separate writable
+   folder. Keep AltSnap.exe, hooks.dll, AltSnap.ini and Lang together.
+2. Exit the currently running AltSnap before launching the test copy. Back up
+   your normal INI; edit the test folder's AltSnap.ini and add the setting below
+   to its existing `[KBShortcuts]` section. Restart the test copy after editing.
+   The ZIP ships with AutoTileGrid and Linked Grid Resize disabled.
+3. Start with 1–4 separate, normal, resizable windows of a recent per-monitor
+   DPI-aware application, for example current Edge/Chrome windows. Use the same
+   monitor/scaling and privilege level. Minimize other eligible windows on that
+   monitor; tabs are not separate windows. Avoid MobaXterm and apps with special
+   size constraints for the first successful layout check.
+4. Put the cursor on that monitor and press **Ctrl+Alt+G**. Check the layouts in
+   the table below, repeat to check stability, and try five windows to check
+   refusal. Windows on the other monitor must remain untouched.
+5. For the four-window integration test also set `[General]`
+   `LinkedGridResize=1` and `StickyResize=2`, then restart. Use your configured
+   AltSnap resize gesture (default Alt + right-button drag) at each inner corner.
+   Check both `FullWin=0` and `FullWin=1`. Press Ctrl+Alt+G during a drag: it must
+   leave the drag alone. Release the drag before testing another layout.
+6. Finally try an app with restrictive sizes, including MobaXterm. An infeasible
+   layout should refuse before moving anything. A late size correction can
+   trigger best-effort restoration; verify the result and report any partial
+   layout. No application-specific size restrictions are bypassed. Repeat the
+   previously successful Linked Grid +107 px refusal/rollback scenario and
+   confirm that all four windows remain aligned and the drag stops.
+
+If nothing happens, check the INI next to the running test EXE, its section and
+the value 839, restart AltSnap, and ensure another app has not registered
+Ctrl+Alt+G. The command deliberately does nothing for zero or more than four
+eligible windows, during a drag, or when any otherwise eligible participant
+fails DPI, identity, timeout, min/max or stable-snapshot checks. Minimize suspect
+windows and retry with one known per-monitor-aware window. An elevated, hung or
+legacy-DPI window may cause a safe refusal; do not force resizing or elevate
+AltSnap just to bypass it. Remove the shortcut or set `AutoTileGrid=0` and
+restart to disable its registration.
+
+`LinkedGridTrace=1` in `[General]` is optional **Linked Grid Resize** diagnostics,
+not an AutoTileGrid success/failure log; leave it absent/0 normally. See
+[diagnostics](tests/LINKED_GRID_DIAGNOSTICS.md) for capture instructions.
+**Real Windows GUI testing was not performed in the cloud.** Portable adapter
+stubs and cross-compilation do not establish real Windows application behavior.
+
+## Configuration and layout
+
 Assign the command in the existing AltSnap.ini keyboard section, then reload
 AltSnap settings:
 
@@ -84,18 +134,26 @@ StickyResize=2
 
 Start an existing AltSnap resize at an inner corner. StickyResize=2 activates
 without Shift; StickyResize=1/3 uses Shift as documented by the existing feature.
-Linked Grid Resize, drag processing and the mouse queue have not been changed.
+The branch includes Linked Grid Resize diagnostics and the guarded-witness
+rollback fix from commits `0ce2050` and `b894487`. Legacy Sticky Resize behavior
+is preserved; AutoTileGrid itself does not change drag processing or the queue.
 
 ## Validation and manual Windows test
 
-`make -C tests test` runs the existing linked-grid/queue/recovery tests plus
-AutoTileGrid tests. The new suite covers 1–4 layouts, zero/five-window refusal,
+`make -C tests test` runs the linked-grid/queue/recovery tests, both production
+Win32 adapters against deterministic stubs, and AutoTileGrid planner tests.
+The planner suite covers 1–4 layouts, zero/five-window refusal,
 negative origins, odd/tiny work areas, min/max limits, constrained assignments,
 variable native borders, extreme coordinates/overflow, duplicate identities,
 enumeration-independent ties, repeated calls and untouched output on failure.
 2,000 cases are checked against an independent exhaustive assignment oracle.
 The four-cell result, including different native borders, is fed into the actual
 `lg_resize`, `lg_drag_begin` and `lg_drag_update` for every active quadrant.
+The AutoTileGrid adapter suite covers excluded/other-monitor windows, stable
+repeats, unsafe DPI/min-max refusal, changing preflight geometry, batch failures,
+MobaXterm-like +107 px correction/refusal, guarded restoration after external
+geometry/identity changes, and active/pending drag refusal. These model tests
+cannot validate real DWM, UIPI or application message handling.
 ASan/UBSan and MinGW x64 test compilation are supported by tests/Makefile.
 
 Full Windows x64 application build (no Windows GUI execution):
