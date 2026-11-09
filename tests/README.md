@@ -62,3 +62,9 @@ no OS APIs. The hooks.c adapter selects eligible
 windows from the same monitor and maps HWNDs, frame bounds and track limits to
 the pure geometry API. Tolerance and gaps remain unsupported. The Win32 adapter is documented in [LINKED_GRID_INTEGRATION.md](LINKED_GRID_INTEGRATION.md);
 portable tests do not exercise Windows GUI behavior. Old compiler support before C99 is not established.
+
+The test target also runs `linked_grid_win_test.c`, which includes the production
+Win32 adapter against deterministic stubs for exact sizing, corrections, refusal,
+delayed DWM, late native changes and rollback. These are not Windows GUI tests.
+See [fast movement diagnostics](LINKED_GRID_DIAGNOSTICS.md) for evidence, remaining
+hypotheses and the opt-in `LinkedGridTrace=1` Windows test procedure.

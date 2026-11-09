@@ -26,6 +26,58 @@ static struct {
     RECT monitor_rect;
 } linked_candidates;
 
+/* Opt-in debugger output only. No handles, process IDs, titles or content.
+   All calls (including extra DWM reads) are confined to the enabled path. */
+static int linked_trace;
+static int linked_trace_ready;
+static unsigned linked_trace_offers;
+static void LinkedTrace(const char *event, int cell, int a, int b)
+{
+    char line[256];
+    if (!linked_trace) return;
+    wsprintfA(line, "AltSnap.LG t=%lu g=%08x%08x mode=%d event=%s cell=%d a=%d b=%d\n",
+              (unsigned long)GetTickCount(), (unsigned)((uint64_t)linked_queue.generation >> 32),
+              (unsigned)linked_queue.generation, (int)linked.drag.mode, event, cell, a, b);
+    OutputDebugStringA(line);
+}
+
+static void LinkedTraceRect(const char *event, unsigned i, const RECT *wanted,
+                            const RECT *actual, int readable)
+{
+    char line[320];
+    if (!linked_trace) return;
+    wsprintfA(line, "AltSnap.LG g=%08x%08x event=%s cell=%u readable=%d want=%d,%d,%d,%d got=%d,%d,%d,%d\n",
+              (unsigned)((uint64_t)linked_queue.generation >> 32),
+              (unsigned)linked_queue.generation, event, i, readable, (int)wanted->left, (int)wanted->top,
+              (int)wanted->right, (int)wanted->bottom, (int)actual->left,
+              (int)actual->top, (int)actual->right, (int)actual->bottom);
+    OutputDebugStringA(line);
+}
+
+/* A diagnostic snapshot is not atomic. Keep the exact verification read in
+   a separate record; these later DWM/native reads help identify compositor lag. */
+static void LinkedTraceGeometry(const char *event, const RECT *target)
+{
+    unsigned i;
+    if (!linked_trace || !linked_trace_ready) return;
+    LinkedTrace(event, -1, linked.drag.fullwin, linked.drag.dirty);
+    for (i = 0; i < 4; ++i) {
+        RECT native = {0, 0, 0, 0}, dwm = {0, 0, 0, 0};
+        int native_ok = GetWindowRect(linked.hwnd[i], &native);
+        int dwm_ok = S_OK == DwmGetWindowAttributeL(linked.hwnd[i],
+                                DWMWA_EXTENDED_FRAME_BOUNDS, &dwm, sizeof dwm);
+        LinkedTraceRect("native", i, &target[i], &native, native_ok);
+        LinkedTraceRect("dwm-vs-baseline", i, &linked.actual[i], &dwm, dwm_ok);
+        LinkedTraceRect("cached-border", i, &linked.border[i], &linked.border[i], 1);
+    }
+}
+
+static int LinkedInvalid(const char *reason, unsigned i)
+{
+    LinkedTrace(reason, (int)i, 0, 0);
+    return 0;
+}
+
 static BOOL CALLBACK EnumLinkedGrid(HWND hwnd, LPARAM unused)
 {
     RECT r;
@@ -79,12 +131,16 @@ static void BeginLinkedGrid(POINT mouse)
         ++active;
     if (active == linked_candidates.count) return;
     LGRect a = linked_candidates.windows[active].rect;
-    if (lg_resize(linked_candidates.windows, linked_candidates.count, active,
+    LGStatus detected = lg_resize(linked_candidates.windows, linked_candidates.count, active,
                   (LGQuadrant)q, (q & 1) ? a.left : a.right,
-                  (q & 2) ? a.top : a.bottom, &found) != LG_OK) return;
+                  (q & 2) ? a.top : a.bottom, &found);
+    LinkedTrace("detect", -1, (int)detected, 0);
+    if (detected != LG_OK) return;
     /* From here a grid was captured. Any failure blocks, never falls back. */
     linked.drag.mode = LG_DRAG_BLOCKED;
     linked.drag.dirty = 0;
+    linked_trace_ready = 0;
+    LinkedTrace("captured", -1, (int)q, conf.FullWin);
     for (i = 0; i < 4; ++i) {
         HWND hwnd = linked_candidates.hwnd[found.indices[i]];
         POINT lo, hi;
@@ -92,14 +148,20 @@ static void BeginLinkedGrid(POINT mouse)
         linked.hwnd[i] = hwnd;
         linked.tid[i] = GetWindowThreadProcessId(hwnd, &linked.pid[i]);
         linked.dpi[i] = GetDpiForWindow(hwnd);
-        if (linked.dpi[i] != state.origin.dpi || !GetWindowRect(hwnd, &linked.actual[i])) return;
+        if (linked.dpi[i] != state.origin.dpi || !GetWindowRect(hwnd, &linked.actual[i])) {
+            LinkedTrace("capture-native-dpi", (int)i, 0, 0); return;
+        }
         /* Require DWM bounds, avoiding mixed virtualized/fallback rectangles. */
         if (S_OK != DwmGetWindowAttributeL(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS,
-                                          &visible, sizeof visible)) return;
+                                          &visible, sizeof visible)) {
+            LinkedTrace("capture-dwm", (int)i, 0, 0); return;
+        }
         FixDWMRectLL(hwnd, &linked.border[i], 0);
         windows[i] = linked_candidates.windows[found.indices[i]];
         if (visible.left != windows[i].rect.left || visible.top != windows[i].rect.top
-            || visible.right != windows[i].rect.right || visible.bottom != windows[i].rect.bottom) return;
+            || visible.right != windows[i].rect.right || visible.bottom != windows[i].rect.bottom) {
+            LinkedTrace("capture-changed", (int)i, 0, 0); return;
+        }
         /* A timed-out query cannot establish safe limits. */
         MINMAXINFO mmi;
         DWORD_PTR response;
@@ -109,19 +171,29 @@ static void BeginLinkedGrid(POINT mouse)
         mmi.ptMaxTrackSize.x = GetSystemMetricsForDpi(SM_CXMAXTRACK, linked.dpi[i]);
         mmi.ptMaxTrackSize.y = GetSystemMetricsForDpi(SM_CYMAXTRACK, linked.dpi[i]);
         if (!SendMessageTimeout(hwnd, WM_GETMINMAXINFO, 0, (LPARAM)&mmi,
-                                SMTO_ABORTIFHUNG, 32, &response)) return;
+                                SMTO_ABORTIFHUNG, 32, &response)) {
+            if (linked_trace) LinkedTrace("capture-limits-query", (int)i, (int)GetLastError(), 0);
+            return;
+        }
         lo = mmi.ptMinTrackSize;
         hi = mmi.ptMaxTrackSize;
         LONG bx = linked.border[i].left + linked.border[i].right;
         LONG by = linked.border[i].top + linked.border[i].bottom;
         if (lo.x < 1 || lo.y < 1 || hi.x < lo.x || hi.y < lo.y
-            || bx < 0 || by < 0) return;
+            || bx < 0 || by < 0) {
+            LinkedTrace("capture-limits-invalid", (int)i, 0, 0); return;
+        }
         windows[i].min_width = (int32_t)larger(1, (int64_t)lo.x - bx);
         windows[i].min_height = (int32_t)larger(1, (int64_t)lo.y - by);
         windows[i].max_width = hi.x - bx;
         windows[i].max_height = hi.y - by;
+        LinkedTrace("limits-width", (int)i, windows[i].min_width, windows[i].max_width);
+        LinkedTrace("limits-height", (int)i, windows[i].min_height, windows[i].max_height);
     }
-    lg_drag_begin(&linked.drag, windows, 4, q, (LGQuadrant)q, 1, conf.FullWin);
+    linked_trace_ready = 1; /* All four native rectangles/borders are initialized. */
+    LGStatus status = lg_drag_begin(&linked.drag, windows, 4, q, (LGQuadrant)q, 1, conf.FullWin);
+    LinkedTrace("begin", -1, (int)status, 0);
+    LinkedTraceGeometry("baseline", linked.actual);
     linked.mouse = mouse;
     linked.x = found.x;
     linked.y = found.y;
@@ -136,11 +208,22 @@ static int LinkedGridValid(void)
         HWND hwnd = linked.hwnd[i];
         DWORD tid = GetWindowThreadProcessId(hwnd, &pid);
         FixDWMRectLL(hwnd, &bd, 0);
-        if (!tid || tid != linked.tid[i] || pid != linked.pid[i]
-            || IsIconic(hwnd) || IsZoomed(hwnd) || !IsVisible(hwnd)
-            || GetDpiForWindow(hwnd) != linked.dpi[i]
-            || !EqualRect(&bd, &linked.border[i])
-            || !GetWindowRect(hwnd, &rc) || !EqualRect(&rc, &linked.actual[i])) return 0;
+        if (!tid || tid != linked.tid[i] || pid != linked.pid[i])
+            return LinkedInvalid("valid-identity", i);
+        if (IsIconic(hwnd) || IsZoomed(hwnd) || !IsVisible(hwnd))
+            return LinkedInvalid("valid-state", i);
+        if (GetDpiForWindow(hwnd) != linked.dpi[i]) return LinkedInvalid("valid-dpi", i);
+        if (!EqualRect(&bd, &linked.border[i])) {
+            LinkedTraceRect("valid-border", i, &linked.border[i], &bd, 1);
+            LinkedTraceGeometry("valid-border-stop", linked.actual);
+            return 0;
+        }
+        int readable = GetWindowRect(hwnd, &rc);
+        if (!readable || !EqualRect(&rc, &linked.actual[i])) {
+            if (!readable) SetRectEmpty(&rc);
+            LinkedTraceRect("valid-native", i, &linked.actual[i], &rc, readable);
+            return 0;
+        }
     }
     return 1;
 }
@@ -149,7 +232,9 @@ static int ApplyLinkedRects(const RECT *rects, unsigned mask)
 {
     HDWP batch;
     unsigned i, count = 0;
-    if (!lg_queue_current(&linked_queue, linked_dispatch)) return 0;
+    if (!lg_queue_current(&linked_queue, linked_dispatch)) {
+        LinkedTrace("apply-stale", -1, 0, 0); return 0;
+    }
     for (i = 0; i < 4; ++i) count += !!(mask & (1u << i));
     if (!count) return 1;
     batch = BeginDeferWindowPos(count);
@@ -157,8 +242,17 @@ static int ApplyLinkedRects(const RECT *rects, unsigned mask)
         batch = DeferWindowPos(batch, linked.hwnd[i], NULL, rects[i].left, rects[i].top,
                     rects[i].right - rects[i].left, rects[i].bottom - rects[i].top,
                     SWP_NOACTIVATE|SWP_NOZORDER|SWP_NOOWNERZORDER);
-    return batch && lg_queue_current(&linked_queue, linked_dispatch)
-        && EndDeferWindowPos(batch);
+    if (!batch) {
+        if (linked_trace) LinkedTrace("defer-failed", -1, (int)mask, (int)GetLastError());
+        return 0;
+    }
+    if (!lg_queue_current(&linked_queue, linked_dispatch)) {
+        LinkedTrace("defer-stale", -1, 0, 0); return 0;
+    }
+    int ok = EndDeferWindowPos(batch);
+    if (!ok && linked_trace) LinkedTrace("end-defer-error", -1, (int)GetLastError(), 0);
+    LinkedTrace("end-defer", -1, ok, (int)mask);
+    return ok;
 }
 
 static int LinkedParticipantIdentity(unsigned i)
@@ -167,10 +261,14 @@ static int LinkedParticipantIdentity(unsigned i)
     HWND hwnd = linked.hwnd[i];
     DWORD tid = GetWindowThreadProcessId(hwnd, &pid);
     RECT bd;
-    if (!tid || tid != linked.tid[i] || pid != linked.pid[i]
-        || IsIconic(hwnd) || IsZoomed(hwnd) || !IsVisible(hwnd)
-        || GetDpiForWindow(hwnd) != linked.dpi[i]) return 0;
+    if (!tid || tid != linked.tid[i] || pid != linked.pid[i])
+        return LinkedInvalid("recover-identity", i);
+    if (IsIconic(hwnd) || IsZoomed(hwnd) || !IsVisible(hwnd))
+        return LinkedInvalid("recover-state", i);
+    if (GetDpiForWindow(hwnd) != linked.dpi[i]) return LinkedInvalid("recover-dpi", i);
     FixDWMRectLL(hwnd, &bd, 0);
+    if (!EqualRect(&bd, &linked.border[i]))
+        LinkedTraceRect("recover-border", i, &linked.border[i], &bd, 1);
     return EqualRect(&bd, &linked.border[i]);
 }
 
@@ -199,10 +297,12 @@ static void RecoverLinkedGrid(const RECT *target)
             && GetWindowRect(linked.hwnd[i], &current)) {
             identity |= 1u << i;
             observed[i] = (LGRect){current.left, current.top, current.right, current.bottom};
+            LinkedTraceRect("recover-observed", i, &target[i], &current, 1);
         }
     }
     if (!lg_queue_current(&linked_queue, linked_dispatch)) return;
     mask = lg_recovery_mask(before, requested, observed, identity);
+    LinkedTrace("recover-mask", -1, (int)mask, (int)identity);
     /* One bad participant can fail the whole batch. Try it only when every
        participant still belongs to this operation, then fall back per HWND. */
     if (identity == 15 && mask)
@@ -210,15 +310,18 @@ static void RecoverLinkedGrid(const RECT *target)
     for (i = 0; i < 4; ++i) if (mask & (1u << i)) {
         RECT current;
         if (!lg_queue_current(&linked_queue, linked_dispatch)) return;
-        if (!LinkedRestoreEligible(i, target)) continue;
+        if (!LinkedRestoreEligible(i, target)) {
+            LinkedTrace("recover-ineligible", (int)i, 0, 0); continue;
+        }
         if (!GetWindowRect(linked.hwnd[i], &current)) continue;
         if (EqualRect(&current, &linked.actual[i])) continue;
         if (!batch_ok || !EqualRect(&current, &linked.actual[i])) {
             if (!lg_queue_current(&linked_queue, linked_dispatch)) return;
-            SetWindowPos(linked.hwnd[i], NULL, linked.actual[i].left, linked.actual[i].top,
+            int restored = SetWindowPos(linked.hwnd[i], NULL, linked.actual[i].left, linked.actual[i].top,
                          linked.actual[i].right - linked.actual[i].left,
                          linked.actual[i].bottom - linked.actual[i].top,
                          SWP_NOACTIVATE|SWP_NOZORDER|SWP_NOOWNERZORDER);
+            LinkedTrace("recover-individual", (int)i, restored, 0);
         }
         if (!lg_queue_current(&linked_queue, linked_dispatch)) return;
         /* Check the result; the drag remains blocked even if recovery worked. */
@@ -228,6 +331,7 @@ static void RecoverLinkedGrid(const RECT *target)
                freezes this drag; no further recovery is safe here. */
         }
     }
+    LinkedTraceGeometry("recover-result", linked.actual);
 }
 
 static int CommitLinkedGrid(void)
@@ -247,13 +351,19 @@ static int CommitLinkedGrid(void)
     /* Applications may reject sizes in WM_WINDOWPOSCHANGING. Verify all four;
        best-effort rollback to the last verified batch, then freeze the drag. */
     for (i = 0; i < 4; ++i) {
-        RECT actual;
-        if (!GetWindowRect(linked.hwnd[i], &actual) || !EqualRect(&actual, &next[i])) ok = 0;
+        RECT actual = {0, 0, 0, 0};
+        int readable = GetWindowRect(linked.hwnd[i], &actual);
+        if (!readable || !EqualRect(&actual, &next[i])) {
+            ok = 0;
+            LinkedTraceRect("verify-mismatch", i, &next[i], &actual, readable);
+        }
     }
     if (!lg_queue_current(&linked_queue, linked_dispatch)) return 0;
     if (!ok) {
+        LinkedTraceGeometry("apply-failed", next);
         RecoverLinkedGrid(next);
         lg_drag_stop(&linked.drag);
+        LinkedTrace("blocked", -1, 0, 0);
         return 0;
     }
     for (i = 0; i < 4; ++i) {
@@ -261,5 +371,6 @@ static int CommitLinkedGrid(void)
         ClearRestoreFlagOnResizeIfNeeded(linked.hwnd[i]);
     }
     linked.drag.dirty = 0;
+    LinkedTrace("verified", -1, linked.drag.pending.x, linked.drag.pending.y);
     return 1;
 }
