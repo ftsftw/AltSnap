@@ -1,54 +1,95 @@
 # Fast movement investigation (Windows 10)
 
-The reported mixed-application failure has **not** been reproduced on a Windows
-desktop here. This change adds opt-in diagnostics, not a speculative geometry or
-rollback fix. Four Notepads working on the user's machine does not establish how
-terminals or Explorer handle positioning messages.
+## Confirmed Windows 10 evidence
 
-## Audit and deterministic evidence
+The supplied real trace reproduces with MobaXterm while four Notepads and three
+Notepads plus Windows Terminal work. Capture and earlier batches verified all
+four windows. On the failing FullWin=1 jump:
 
-The bounded mailbox retains one complete `(generation, x, y)` sample and at most
-one outstanding wake. Offers replace both axes together; intermediate coordinates
-are unnecessary. Finish is posted behind that wake and production stops before
-finish. Busy reentry invalidates the operation instead of recursively applying
-another batch. Threading/queue policy is unchanged; slow cross-process Win32
-calls can still delay the hook owner.
+- `end-defer a=1 b=15`: Win32 reported success for the four-window request.
+- `verify-mismatch cell=3`: requested native RECT `1485,429,2567,1366`, observed
+  `1485,429,2674,1366`. Only the right edge changed, by **+107 pixels**.
+- DWM followed that actual size. This trace supplies no evidence of DWM lag.
+- `recover-mask a=7 b=15`: the original adapter excluded the adjusted window,
+  restored the other three, then blocked the drag, leaving a broken grid.
 
-`MouseMoveNow` calculates the intersection from the initial cursor using 64-bit
-arithmetic, saturates to int32, and `lg_drag_update` clamps against all four
-captured min/max intervals. Large jumps do not accumulate rounding or use a
-previous cell's geometry. WM_GETMINMAXINFO is only a snapshot: it cannot describe
-character-cell increments, arbitrary WM_WINDOWPOSCHANGING corrections or later
-asynchronous changes. No application constraints are bypassed by this change.
+This confirms the exact-target-only recovery exclusion. It does **not** establish
+which MobaXterm callback changed the size. An application can modify WINDOWPOS
+in WM_WINDOWPOSCHANGING or perform another resize during/after positioning.
+WM_GETMINMAXINFO supplies min/max track sizes, not arbitrary size rules,
+character-cell increments, content-dependent limits or subsequent corrections.
+API success is not exact-RECT acceptance or a transaction. No queue malfunction
+was observed in this trace, so queue/drag processing is unchanged.
 
-`LinkedGridValid` checks identity, state, DPI, native rectangles and DWM-derived
-border extents before movement and commit. Commit applies four native targets
-with DeferWindowPos and verifies exact native rectangles afterward. Failure
-attempts recovery and blocks the drag. Recovery requires unchanged identity,
-DPI/border and an actual rectangle equal to the requested one; a third rectangle
-is left alone because an external move cannot be distinguished from an app's
-correction. DeferWindowPos is not an atomic transaction against application code.
+## Guarded size-correction recovery
 
-`linked_grid_win_test.c` includes the **production adapter** with Win32 stubs.
-These outcomes also reproduce against the original adapter at
-`0dff0da5988124d38fd80fafbb7b255bbf397d22` (before diagnostic changes):
+Commit retains all four native RECT reads from the immediate post-apply
+verification, before diagnostic geometry reads. On a successful batch a differing
+RECT is an eligible size-correction witness only if its left/top still equal the
+requested origin and its width/height are positive. A changed origin is skipped.
+On batch API failure only exact requested observations are eligible, preserving
+the conservative rule for ambiguous partial failures. Unreadable observations
+are never eligible.
+
+Recovery requires the same generation, HWND process/thread identity, visibility,
+normal state, DPI and frame extents, plus a native RECT still equal to the
+witness. It then rechecks each participant immediately before one SetWindowPos
+back to the **last verified** grid. The recovery batch was removed: an earlier
+window's positioning callback can move another participant after selection, and
+that later window must be revalidated before it is touched. A participant already
+at baseline needs no write. A later differing RECT is skipped, including a move
+back to the originally requested RECT. Neither tracing nor a failed restoration
+can replace the saved witness. Every restoration is read back; refusal/correction
+is diagnosed, without retrying or adopting a new baseline. Failure blocks this
+drag. Cancellation/stale dispatch stops further writes and cannot block a newer
+operation on recovery return.
+
+This is **guarded best effort**, not proof of ownership or full rollback. The
+interval between EndDeferWindowPos and the first native observation cannot be
+attributed atomically: an external resize with the same requested origin could
+already be in that observation. There is also a check-to-SetWindowPos race and
+same-thread HWND reuse cannot be ruled out by PID/TID. No sequence of ordinary
+GetWindowRect/SetWindowPos calls eliminates these races. A later external change
+that is actually observed is protected, but an ABA change back to the witness is
+not detectable. A window can refuse the old size, disappear, change DPI/state or
+fail the unchanged frame checks; the grid can then remain broken. Cancellation
+cannot undo positioning already entered and adds no rollback-on-Escape.
+
+If these residual races are unacceptable for a particular application, the
+conservative alternative is `LinkedGridResize=0` for that session. FullWin=0
+reduces application frequency to release but uses the same acceptance/recovery
+boundary and is not a safety guarantee. Keep the unsupported application out of
+the grid if necessary. There is no repeated negotiation, bypass of application
+constraints, DWM workaround, new service, dependency or background process.
+
+## Deterministic adapter evidence
+
+`linked_grid_win_test.c` includes the production adapter against Win32 stubs.
+The exact Windows trace coordinates and +107 correction now restore **all four**
+participants when the baseline is accepted. The prior adapter at
+`0ce205002b81463450ab489a50b25aebac1e17d8` leaves the adjusted participant behind.
+Tests exercise all four active corners and every corrected/refusing participant,
+including restoration after earlier successful commits.
 
 | Simulated behavior | Result |
 | --- | --- |
-| Exact sizes, extreme jumps, repeated coalesced samples | Grid aligned; four min/max intervals honored |
-| One participant rejects size; DWM current | Accepted survivors restore; drag blocked |
-| One participant corrects size by 7 pixels | Third rectangle skipped; survivors restore; grid can remain broken |
-| Exact sizes; stale DWM bounds | Native grid intact; next border validation stops drag |
-| One rejection plus stale DWM on survivors | Survivors fail border eligibility; rollback skips them; grid can remain broken |
-| Native change after successful verification | Next validation stops drag; changed grid can remain broken |
+| Exact sizing, extreme jumps, repeated coalesced samples | Grid remains aligned; four min/max intervals honored |
+| +107 right-edge correction, API success, DWM current | All four restore; drag blocked |
+| Application refuses the old size despite API success | Other eligible windows restore; one attempt; mismatch diagnosed |
+| Origin changes, or third RECT with batch API failure | Third RECT skipped; exact eligible survivors restore |
+| External move before recovery selection or at final recheck | Changed participant skipped |
+| Earlier restoration callback moves later participant (also to request) | Later participant skipped |
+| HWND disappears or PID/TID differs after apply | That participant receives no restoration |
+| Cancellation/stale generation during apply, verification or recovery | No subsequent positioning from the old operation |
+| Native change during restoration readback | Mismatch diagnosed; no repeated restoration |
+| Native change after a successful commit | Next validation stops drag |
+| Exact sizes with stale DWM | Native grid intact; next border validation stops drag |
+| Rejected size with stale DWM on survivors | Frame checks still reject recovery; grid can remain broken |
 
-Tests also cover failed batches, rollback refusal and cancellation during a batch.
-All four active corners and each failing participant are exercised. Stub behavior
-is injected deliberately; it is **not evidence that a particular real app or
-DWM behaves this way**. Late correction, transient DWM bounds, runtime limits
-and notification-related changes remain hypotheses for the user's case.
-Removing frame checks or restoring arbitrary third rectangles without evidence
-would weaken protection of external changes, so no such fix is made.
+The final two cases remain deliberately unchanged; the supplied trace does not
+justify relaxing DWM frame protection. These tests model behavior, **not a real
+Windows GUI or MobaXterm callback**. The exact message that imposes the size rule
+still needs application-side debugging if that distinction is required.
 
 Capture latches ACTIVE/BLOCKED. `lg_drag_stop` cannot switch either to LEGACY;
 movement returns before legacy clamping/Sticky Resize, clears LastWin.hwnd, and
@@ -69,12 +110,17 @@ Tests exercise adapter/policy transitions, not hooks or the real message pump.
    Tracing defaults off (missing key or zero). With LinkedGridResize=0 the key
    is not read and no new diagnostic calls, counters, queries, allocations or
    output run on the legacy move path.
-4. On each monitor separately, arrange four Notepads with Win+arrows, then the
-   mixed Explorer/OpenCode/MobaXterm/Windows Terminal grid. Hold the Sticky Resize
-   modifier before clicking. Try slow moves and sharp long horizontal, vertical
+4. On each monitor separately, first repeat four Notepads and three Notepads
+   plus Windows Terminal. Then recreate the failing mixed grid, preserving the
+   application in every quadrant (especially MobaXterm/cell=3). Hold the Sticky
+   Resize modifier before clicking. Try slow moves and sharp long horizontal, vertical
    and diagonal jumps from each inner corner. Include monitor 2/negative
    coordinates; record the scaling of both monitors.
-5. Save one short filtered trace from capture through failure and mouse release.
+5. On the +107 case expect `recover-witness a=15 b=1`, then (if state and RECTs
+   stayed unchanged) `recover-mask a=15 b=15`, four `recover-individual` attempts,
+   all four `recover-result` native RECTs at the preceding verified baseline,
+   and `blocked`. A refusal should emit `recover-mismatch`; an intervening move
+   should be skipped, not overwritten. Save capture through mouse release.
    Try Escape and a fresh drag after stopping. Repeat with FullWin=0 (outline,
    batch on release), then tracing off to check timing influence. Finally check
    ordinary resizing with LinkedGridResize=0.
@@ -90,8 +136,13 @@ event, cell (`0=TL, 1=TR, 2=BL, 3=BR; -1=whole drag`) and event-specific `a,b`.
 `requested`/`solved` give cursor-derived/clamped intersections. `offers.a` counts
 samples since dispatch (more than one means coalescing). `begin.a` is LGStatus
 (`0=OK, 4=incompatible limits`). `end-defer.a` is success; `.b` is the participant
-bitmask. Error records contain Win32 error codes. `recover-mask.a` is restoration
-eligibility, `.b` valid identity; bits correspond to cells and explain skips.
+bitmask. Error records contain Win32 error codes. `recover-witness.a` is the
+eligible post-apply observation mask, `.b` the forward batch API result.
+`recover-mask.a` is restoration eligibility at recovery selection, `.b` valid
+identity/state/frame checks; bits correspond to cells and explain skips.
+A selected participant can still become ineligible before its individual attempt.
+`recover-individual.a` is the SetWindowPos API result, not proof of acceptance;
+`recover-mismatch` records failed baseline readback.
 
 Rectangle records contain generation, cell, readable flag and `want/got` as
 left,top,right,bottom. `verify-mismatch` preserves the exact failed native read.

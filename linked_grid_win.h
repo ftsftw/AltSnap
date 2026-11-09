@@ -272,72 +272,65 @@ static int LinkedParticipantIdentity(unsigned i)
     return EqualRect(&bd, &linked.border[i]);
 }
 
-/* Recheck identity and ownership immediately before every individual attempt.
-   A window adjusted externally to a third rectangle is left alone. */
-static int LinkedRestoreEligible(unsigned i, const RECT *target)
+/* The post-apply witness is an expected value, not proof of causation. Recheck
+   it immediately before each restore; never overwrite an observed later move. */
+static int LinkedRestoreEligible(unsigned i, const RECT *expected, RECT *current)
 {
-    RECT current;
-    return LinkedParticipantIdentity(i) && GetWindowRect(linked.hwnd[i], &current)
-        && (EqualRect(&current, &linked.actual[i]) || EqualRect(&current, &target[i]));
+    return lg_queue_current(&linked_queue, linked_dispatch)
+        && LinkedParticipantIdentity(i) && GetWindowRect(linked.hwnd[i], current)
+        && (EqualRect(current, &linked.actual[i]) || EqualRect(current, &expected[i]));
 }
 
-static void RecoverLinkedGrid(const RECT *target)
+static void RecoverLinkedGrid(const RECT *expected, unsigned witnessed)
 {
-    LGRect before[4], requested[4], observed[4];
+    LGRect before[4], owned[4], observed[4];
     unsigned identity = 0, mask, i;
-    int batch_ok = 0;
     for (i = 0; i < 4; ++i) {
         RECT current;
         before[i] = (LGRect){linked.actual[i].left, linked.actual[i].top,
                              linked.actual[i].right, linked.actual[i].bottom};
-        requested[i] = (LGRect){target[i].left, target[i].top,
-                                target[i].right, target[i].bottom};
+        owned[i] = (LGRect){expected[i].left, expected[i].top,
+                          expected[i].right, expected[i].bottom};
         if (lg_queue_current(&linked_queue, linked_dispatch)
             && LinkedParticipantIdentity(i)
             && GetWindowRect(linked.hwnd[i], &current)) {
             identity |= 1u << i;
             observed[i] = (LGRect){current.left, current.top, current.right, current.bottom};
-            LinkedTraceRect("recover-observed", i, &target[i], &current, 1);
+            LinkedTraceRect("recover-observed", i, &expected[i], &current, 1);
         }
     }
     if (!lg_queue_current(&linked_queue, linked_dispatch)) return;
-    mask = lg_recovery_mask(before, requested, observed, identity);
+    mask = lg_recovery_mask(before, owned, observed, identity & witnessed);
     LinkedTrace("recover-mask", -1, (int)mask, (int)identity);
-    /* One bad participant can fail the whole batch. Try it only when every
-       participant still belongs to this operation, then fall back per HWND. */
-    if (identity == 15 && mask)
-        batch_ok = ApplyLinkedRects(linked.actual, mask);
+    /* No recovery batch: an earlier participant's positioning callback can move
+       a later one. Revalidate each HWND after the preceding restore returns. */
     for (i = 0; i < 4; ++i) if (mask & (1u << i)) {
-        RECT current;
+        RECT current = {0, 0, 0, 0};
         if (!lg_queue_current(&linked_queue, linked_dispatch)) return;
-        if (!LinkedRestoreEligible(i, target)) {
+        if (!LinkedRestoreEligible(i, expected, &current)) {
             LinkedTrace("recover-ineligible", (int)i, 0, 0); continue;
         }
-        if (!GetWindowRect(linked.hwnd[i], &current)) continue;
         if (EqualRect(&current, &linked.actual[i])) continue;
-        if (!batch_ok || !EqualRect(&current, &linked.actual[i])) {
-            if (!lg_queue_current(&linked_queue, linked_dispatch)) return;
-            int restored = SetWindowPos(linked.hwnd[i], NULL, linked.actual[i].left, linked.actual[i].top,
-                         linked.actual[i].right - linked.actual[i].left,
-                         linked.actual[i].bottom - linked.actual[i].top,
-                         SWP_NOACTIVATE|SWP_NOZORDER|SWP_NOOWNERZORDER);
-            LinkedTrace("recover-individual", (int)i, restored, 0);
-        }
         if (!lg_queue_current(&linked_queue, linked_dispatch)) return;
-        /* Check the result; the drag remains blocked even if recovery worked. */
-        if (!GetWindowRect(linked.hwnd[i], &current)
-            || !EqualRect(&current, &linked.actual[i])) {
-            /* The verified baseline is no longer established. The caller
-               freezes this drag; no further recovery is safe here. */
-        }
+        int restored = SetWindowPos(linked.hwnd[i], NULL, linked.actual[i].left, linked.actual[i].top,
+                     linked.actual[i].right - linked.actual[i].left,
+                     linked.actual[i].bottom - linked.actual[i].top,
+                     SWP_NOACTIVATE|SWP_NOZORDER|SWP_NOOWNERZORDER);
+        LinkedTrace("recover-individual", (int)i, restored, 0);
+        if (!lg_queue_current(&linked_queue, linked_dispatch)) return;
+        /* One attempt only, even if the API succeeds but the app corrects or
+           refuses the baseline. Never adopt a new witness from a failed restore. */
+        int readable = GetWindowRect(linked.hwnd[i], &current);
+        if (!readable || !EqualRect(&current, &linked.actual[i]))
+            LinkedTraceRect("recover-mismatch", i, &linked.actual[i], &current, readable);
     }
     LinkedTraceGeometry("recover-result", linked.actual);
 }
 
 static int CommitLinkedGrid(void)
 {
-    RECT next[4];
-    unsigned i;
+    RECT next[4], witnessed[4];
+    unsigned i, witness_mask = 0;
     if (!lg_queue_current(&linked_queue, linked_dispatch)
         || linked.drag.mode != LG_DRAG_ACTIVE || !linked.drag.dirty) return 0;
     if (!LinkedGridValid()) { lg_drag_stop(&linked.drag); return 0; }
@@ -346,13 +339,22 @@ static int CommitLinkedGrid(void)
         SetRect(&next[i], r.left, r.top, r.right, r.bottom);
         InflateRectBorder(&next[i], &linked.border[i]);
     }
-    int ok = ApplyLinkedRects(next, 15);
+    int applied = ApplyLinkedRects(next, 15);
+    int ok = applied;
     if (!lg_queue_current(&linked_queue, linked_dispatch)) return 0;
-    /* Applications may reject sizes in WM_WINDOWPOSCHANGING. Verify all four;
-       best-effort rollback to the last verified batch, then freeze the drag. */
+    /* Record the native post-apply observations before any diagnostic reads.
+       A successful API call may still have allowed WM_WINDOWPOSCHANGING size
+       corrections. Accept a third RECT only for a successful batch with the
+       requested origin intact: this is a size-correction witness, not arbitrary
+       repositioning. On API failure retain only exact requested observations. */
     for (i = 0; i < 4; ++i) {
         RECT actual = {0, 0, 0, 0};
         int readable = GetWindowRect(linked.hwnd[i], &actual);
+        witnessed[i] = actual;
+        if (readable && (EqualRect(&actual, &next[i])
+            || (applied && actual.left == next[i].left && actual.top == next[i].top
+                && actual.right > actual.left && actual.bottom > actual.top)))
+            witness_mask |= 1u << i;
         if (!readable || !EqualRect(&actual, &next[i])) {
             ok = 0;
             LinkedTraceRect("verify-mismatch", i, &next[i], &actual, readable);
@@ -361,7 +363,9 @@ static int CommitLinkedGrid(void)
     if (!lg_queue_current(&linked_queue, linked_dispatch)) return 0;
     if (!ok) {
         LinkedTraceGeometry("apply-failed", next);
-        RecoverLinkedGrid(next);
+        LinkedTrace("recover-witness", -1, (int)witness_mask, applied);
+        RecoverLinkedGrid(witnessed, witness_mask);
+        if (!lg_queue_current(&linked_queue, linked_dispatch)) return 0;
         lg_drag_stop(&linked.drag);
         LinkedTrace("blocked", -1, 0, 0);
         return 0;

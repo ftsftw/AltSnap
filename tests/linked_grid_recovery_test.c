@@ -26,6 +26,7 @@ static void recovery_cases(void)
 {
     LGRect before[4], target[4], observed[4];
     unsigned i, failure, missing, refusal;
+    LGRect witness[4];
     for (i = 0; i < 4; ++i) {
         before[i] = (LGRect){(int32_t)i*100, 0, (int32_t)i*100+100, 100};
         target[i] = before[i]; target[i].right += 10;
@@ -51,6 +52,17 @@ static void recovery_cases(void)
     observed[2].left += 3; /* externally changed: not ours to restore */
     CHECK(lg_recovery_mask(before,target,observed,15) == 11);
     CHECK(lg_recovery_mask(before,target,observed,0) == 0);
-    puts("linked_grid_recovery: checks passed");
+    for (i = 0; i < 4; ++i) witness[i] = observed[i] = target[i];
+    witness[3].right += 107; observed[3] = witness[3];
+    CHECK(lg_recovery_mask(before,witness,observed,15) == 15);
+    observed[3].right += 1; /* later external resize differs from the witness */
+    CHECK(lg_recovery_mask(before,witness,observed,15) == 7);
+    observed[3] = target[3]; /* even a move to the request is a later change */
+    CHECK(lg_recovery_mask(before,witness,observed,15) == 7);
+    observed[3] = witness[3];
+    CHECK(lg_recovery_mask(before,witness,observed,7) == 7);
+    observed[3] = before[3]; /* already restored: no write needed */
+    CHECK(lg_recovery_mask(before,witness,observed,15) == 7);
+    printf("linked_grid_recovery: %u checks passed\n",checks);
 }
 int main(void) { preview_cases(); recovery_cases(); return 0; }

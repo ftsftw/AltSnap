@@ -46,10 +46,18 @@ static struct { HWND hwnd; int mdiclient; POINT resize; struct { UINT dpi; } ori
 static struct { int Windows; } BlkLst;
 static LGQueue linked_queue;
 static uintptr_t linked_dispatch;
-enum { EXACT, ADJUST, REJECT };
+enum { EXACT, ADJUST, REJECT, REPOSITION };
+enum { NO_EFFECT, MOVE_EXTERNAL, RESIZE_EXTERNAL, MOVE_TO_REQUESTED, DISAPPEAR, REPLACE_IDENTITY,
+       CANCEL_OPERATION, STALE_OPERATION };
+/* Effects run inside a native read or a positioning callback, after the
+   forward batch. They model races without changing the production adapter. */
+static int read_effect, read_effect_at, restore_effect;
+static unsigned effect_cell, post_apply_reads[4], restore_calls[4];
+static void inject_effect(int effect);
 static struct FakeWindow {
     RECT native, dwm, before;
-    int behavior, lag, missing, refuse_restore;
+    int behavior, lag, missing, refuse_restore, replaced;
+    LONG correction;
     LONG min_width, min_height;
 } fake[4];
 static RECT batch_rect[4];
@@ -81,6 +89,8 @@ static void OutputDebugStringA(const char *s)
 static BOOL GetWindowRect(HWND w, RECT *r)
 {
     ++native_reads;
+    if (batch_calls && ++post_apply_reads[w-1] == (unsigned)read_effect_at
+        && w-1 == effect_cell) inject_effect(read_effect);
     if (window(w)->missing) return 0;
     *r=window(w)->native; return 1;
 }
@@ -112,10 +122,10 @@ static int IsVisible(HWND w) { return !window(w)->missing; }
 static int IsResizable(HWND w) { (void)w; return 1; }
 static UINT GetDpiForWindow(HWND w) { (void)w; return 96; }
 static DWORD GetWindowThreadProcessId(HWND w, DWORD *pid)
-{ *pid=1; return window(w)->missing ? 0 : 1; }
+{ *pid=window(w)->replaced ? 2 : 1; return window(w)->missing ? 0 : 1; }
 static HMONITOR MonitorFromWindow(HWND w, int flags) { (void)w; (void)flags; return 1; }
 static int GetMonitorInfo(HMONITOR m, MONITORINFO *mi)
-{ (void)m; mi->rcMonitor=(RECT){-2000,-2000,2000,2000}; return 1; }
+{ (void)m; mi->rcMonitor=(RECT){-4000,-4000,4000,4000}; return 1; }
 static int RectInRect(const RECT *a, const RECT *b)
 { return b->left>=a->left && b->top>=a->top && b->right<=a->right && b->bottom<=a->bottom; }
 static int EnumDesktopWindows(void *desktop, BOOL (*callback)(HWND,LPARAM), LPARAM p)
@@ -142,7 +152,8 @@ static void apply(HWND w, RECT r)
     if (f->missing || (f->refuse_restore && EqualRect(&r,&f->before))) return;
     if (!EqualRect(&r,&f->before)) {
         if (f->behavior==REJECT) return;
-        if (f->behavior==ADJUST) r.right-=7;
+        if (f->behavior==ADJUST) r.right+=f->correction;
+        if (f->behavior==REPOSITION) { r.left+=31; r.right+=31; }
     }
     f->native=r;
     if (!f->lag) f->dwm=(RECT){r.left+8,r.top,r.right-8,r.bottom-8};
@@ -162,6 +173,29 @@ static int EndDeferWindowPos(HDWP b)
     if (cancel_in_batch) lg_queue_invalidate(&linked_queue);
     return !batch_fail;
 }
+static void inject_effect(int effect)
+{
+    struct FakeWindow *f=&fake[effect_cell];
+    if (effect==MOVE_EXTERNAL) { f->native.left+=31; f->native.right+=31; }
+    if (effect==RESIZE_EXTERNAL) f->native.right+=31;
+    if (effect==MOVE_TO_REQUESTED) f->native=batch_rect[effect_cell];
+    if (effect==DISAPPEAR) f->missing=1;
+    if (effect==REPLACE_IDENTITY) f->replaced=1;
+    if (effect==CANCEL_OPERATION) lg_queue_invalidate(&linked_queue);
+    if (effect==STALE_OPERATION) {
+        lg_queue_invalidate(&linked_queue);
+        linked_queue.busy=0;
+        (void)lg_queue_enter(&linked_queue,linked_queue.generation);
+    }
+    if (!f->lag) f->dwm=(RECT){f->native.left+8,f->native.top,
+                              f->native.right-8,f->native.bottom-8};
+}
 static int SetWindowPos(HWND w, void *after, LONG x, LONG y, LONG cx, LONG cy, int flags)
-{ (void)after; (void)flags; apply(w,(RECT){x,y,x+cx,y+cy}); return 1; }
+{
+    (void)after; (void)flags;
+    ++restore_calls[w-1];
+    apply(w,(RECT){x,y,x+cx,y+cy});
+    if (restore_effect) { int effect=restore_effect; restore_effect=0; inject_effect(effect); }
+    return 1;
+}
 static void ClearRestoreFlagOnResizeIfNeeded(HWND w) { (void)w; }
