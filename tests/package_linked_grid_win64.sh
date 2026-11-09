@@ -12,8 +12,21 @@ mkdir -p "$stage/Lang"
 test -s AltSnap.exe
 test -s hooks.dll
 cp AltSnap.exe hooks.dll License.txt "$stage/"
-cp AltSnap.dni "$stage/AltSnap.ini"
-cp Lang/*.ini "$stage/Lang/"
+# The repository mixes UTF-16 blobs with normalized UTF-8 language blobs.
+# Checkout conversion reports errors for the former, and depends on Git/iconv.
+# Read committed text explicitly and always ship Windows-readable UTF-16LE+BOM.
+python3 - "$stage" <<'PY'
+import pathlib, subprocess, sys
+stage = pathlib.Path(sys.argv[1])
+languages = subprocess.check_output(
+    ['git', 'ls-tree', '-r', '--name-only', 'HEAD', 'Lang/'], text=True
+).splitlines()
+for source in ['AltSnap.dni'] + [n for n in languages if n.endswith('.ini')]:
+    data = subprocess.check_output(['git', 'show', 'HEAD:'+source])
+    text = data.decode('utf-16') if data[:2] in (b'\xff\xfe', b'\xfe\xff') else data.decode('utf-8-sig')
+    member = 'AltSnap.ini' if source == 'AltSnap.dni' else source
+    (stage / member).write_bytes(b'\xff\xfe' + text.encode('utf-16le'))
+PY
 if [[ "$package" == AltSnap-auto-tile-win64-test ]]; then
     cp AUTO_TILE_GRID.md "$stage/"
 fi
@@ -31,7 +44,7 @@ mkdir -p "$output"
 rm -f "$output/$package.zip"
 (cd "$output" && zip -X -q -r "$package.zip" "$package")
 python3 - "$output/$package.zip" "$package" <<'PY'
-import pathlib, sys, zipfile
+import pathlib, subprocess, sys, zipfile
 archive = pathlib.Path(sys.argv[1])
 with zipfile.ZipFile(archive) as z:
     names = set(z.namelist())
@@ -40,7 +53,19 @@ with zipfile.ZipFile(archive) as z:
     if sys.argv[2] == 'AltSnap-auto-tile-win64-test':
         required.add(root + 'AUTO_TILE_GRID.md')
     assert required <= names, required - names
-    assert any(n.startswith(root + 'Lang/') and n.endswith('.ini') for n in names)
+    languages = subprocess.check_output(
+        ['git', 'ls-tree', '-r', '--name-only', 'HEAD', 'Lang/'], text=True
+    ).splitlines()
+    languages = [n for n in languages if n.endswith('.ini')]
+    assert languages
+    assert {root+n for n in languages} <= names
+    for source in ['AltSnap.dni'] + languages:
+        member = 'AltSnap.ini' if source == 'AltSnap.dni' else source
+        data = z.read(root + member)
+        committed = subprocess.check_output(['git', 'show', 'HEAD:'+source])
+        text = committed.decode('utf-16') if committed[:2] in (b'\xff\xfe', b'\xfe\xff') else committed.decode('utf-8-sig')
+        assert data[:2] == b'\xff\xfe', source
+        assert data.decode('utf-16') == text, source
     assert all(n in required or n == root or n == root+'Lang/' or
                (n.startswith(root+'Lang/') and n.endswith('.ini')) for n in names)
     for name in required:
