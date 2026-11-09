@@ -2235,6 +2235,8 @@ static void MouseMove(POINT pt)
     if (g_InFinishMovement) return;
     if (conf.LinkedGridResize) {
         if (linked_queue.closed || !linked_queue_hwnd) return;
+        if (linked_trace && linked.drag.mode != LG_DRAG_LEGACY
+            && linked_trace_offers < INT32_MAX) ++linked_trace_offers;
         if (lg_move_offer(&linked_move, linked_queue.generation, pt.x, pt.y)
             && !PostMessage(linked_queue_hwnd, WM_DOMOUSEMOVE, 0, 0)) {
             linked_move.pending = 0;
@@ -2256,7 +2258,10 @@ static void MouseMoveNow(POINT pt)
     // Check if window still exists
     if (!IsWindow(state.hwnd))
         { LastWin.hwnd = NULL;
-          if (conf.LinkedGridResize && linked.drag.mode != LG_DRAG_LEGACY) HideTransWin();
+          if (conf.LinkedGridResize && linked.drag.mode != LG_DRAG_LEGACY) {
+              LinkedTrace("active-missing", -1, 0, 0);
+              HideTransWin();
+          }
           UnhookMouse(); return; }
 
     // Ensure the point is in its clip rectangle (Windows bug)
@@ -2298,8 +2303,12 @@ static void MouseMoveNow(POINT pt)
         if (linked.drag.mode == LG_DRAG_ACTIVE && LinkedGridValid()) {
             int64_t x = (int64_t)linked.x + pt.x - linked.mouse.x;
             int64_t y = (int64_t)linked.y + pt.y - linked.mouse.y;
-            if (lg_drag_update(&linked.drag, (int32_t)larger(INT32_MIN, smaller(INT32_MAX, x)),
-                               (int32_t)larger(INT32_MIN, smaller(INT32_MAX, y))) == LG_OK) {
+            LinkedTrace("requested", -1, (int)larger(INT32_MIN, smaller(INT32_MAX, x)),
+                        (int)larger(INT32_MIN, smaller(INT32_MAX, y)));
+            LGStatus status = lg_drag_update(&linked.drag, (int32_t)larger(INT32_MIN, smaller(INT32_MAX, x)),
+                                            (int32_t)larger(INT32_MIN, smaller(INT32_MAX, y)));
+            if (status == LG_OK) {
+                LinkedTrace("solved", -1, linked.drag.pending.x, linked.drag.pending.y);
                 LGRect r = lg_preview_active(&linked.drag);
                 RECT bd = linked.border[linked.drag.quadrant];
                 LastWin.hwnd = state.hwnd;
@@ -2321,7 +2330,7 @@ static void MouseMoveNow(POINT pt)
                 }
                 if (!lg_queue_current(&linked_queue, linked_dispatch)) return;
                 state.moving = 1;
-            }
+            } else LinkedTrace("solve-failed", -1, (int)status, 0);
         } else lg_drag_stop(&linked.drag);
         if (linked.drag.mode == LG_DRAG_BLOCKED) HideTransWin();
         LastWin.hwnd = NULL; /* Never let the legacy finalizer move one cell. */
@@ -5439,6 +5448,8 @@ static DWORD WINAPI FinishMovementNow(LPVOID pp)
     if((linked_finish ? linked_notified : conf.FullWin && state.moving == 1))
         NotifySizeMoveStaEnd(state.hwnd, 0);
 
+    if (linked_finish) LinkedTraceGeometry("finish-result", linked.actual);
+
     state.action = k_action_none;
     state.moving = 0;
     state.snap = conf.AutoSnap;
@@ -5858,6 +5869,8 @@ static void CancelLinkedQueue(void)
     InterlockedIncrement(&movement_generation);
     g_InFinishMovement = 0;
     if (!conf.LinkedGridResize) return;
+    if (linked.drag.mode != LG_DRAG_LEGACY)
+        LinkedTrace("cancel", -1, linked_queue.busy, linked_move.pending);
     lg_queue_invalidate(&linked_queue);
     if (linked.drag.mode != LG_DRAG_LEGACY) HideTransWin();
     lg_drag_stop(&linked.drag);
@@ -5873,15 +5886,24 @@ static LRESULT CALLBACK LinkedQueueProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         if (!lg_move_take(&linked_move, &generation, &x, &y)) return 0;
         pt.x = x; pt.y = y;
     } else generation = (uintptr_t)wp;
-    if (!lg_queue_current(&linked_queue, generation)) return 0;
+    if (!lg_queue_current(&linked_queue, generation)) {
+        LinkedTrace("dispatch-stale", -1, (int)(unsigned)generation,
+                    (int)(unsigned)((uint64_t)generation >> 32)); return 0;
+    }
     /* A nested modal message loop must not execute another movement on the
        same stack. Fail closed instead of leaving a dropped finish latched. */
     if (!lg_queue_enter(&linked_queue, generation)) {
+        LinkedTrace("dispatch-busy", -1, (int)msg, 0);
         CancelLinkedQueue();
         return 0;
     }
     linked_dispatch = generation;
     if (msg == WM_DOMOUSEMOVE) {
+        if (linked_trace && linked.drag.mode != LG_DRAG_LEGACY) {
+            LinkedTrace("dispatch", -1, pt.x, pt.y);
+            LinkedTrace("offers", -1, (int)linked_trace_offers, 0);
+            linked_trace_offers = 0;
+        }
         /* Mouse-up is queued behind these samples. Do not discard the last
            sample merely because its finalizer has already been posted. */
         UCHAR finishing = g_InFinishMovement;
@@ -5893,6 +5915,8 @@ static LRESULT CALLBACK LinkedQueueProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
     } else if (msg == WM_LG_COMBO) {
         DoMoveResizeMaxMinComboAction(NULL);
     } else {
+        if (linked.drag.mode != LG_DRAG_LEGACY)
+            LinkedTrace("finish", -1, linked.drag.fullwin, linked.drag.dirty);
         FinishMovementNow(NULL);
         /* Retire also when Alt remains held (no UnhookMouse). */
         lg_queue_invalidate(&linked_queue);
@@ -6917,6 +6941,10 @@ __declspec(dllexport) WNDPROC WINAPI Load(HWND mainhwnd, const TCHAR *inipath)
     // [General]
     GetPrivateProfileSection(TEXT("General"), inisection, inisectionlen, inipath);
     readalluchars(&conf.AutoFocus, inisection, General_uchars, ARR_SZ(General_uchars));
+    if (conf.LinkedGridResize) {
+        linked_trace = GetSectionOptionInt(inisection, "LinkedGridTrace", 0) == 1;
+        linked_trace_offers = 0;
+    }
 
     // [General] consistency checks
     conf.CenterFraction=min(conf.CenterFraction, 100);
