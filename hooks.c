@@ -699,11 +699,10 @@ static void OffsetRectMDI(RECT *wnd)
 {
     OffsetRect(wnd, -state.mdipt.x, -state.mdipt.y);
 }
-static int ShouldSnapTo(HWND hwnd)
+static int IsSnapCandidate(HWND hwnd)
 {
     LONG_PTR style;
-    return hwnd != state.hwnd
-        && IsVisible(hwnd)
+    return IsVisible(hwnd)
         && !IsIconic(hwnd)
         && !(GetWindowLongPtr(hwnd, GWL_EXSTYLE)&WS_EX_NOACTIVATE) // != WS_EX_NOACTIVATE
         &&( ((style=GetWindowLongPtr(hwnd, GWL_STYLE))&WS_CAPTION) == WS_CAPTION
@@ -713,6 +712,10 @@ static int ShouldSnapTo(HWND hwnd)
         );
 }
 
+static int ShouldSnapTo(HWND hwnd)
+{
+    return hwnd != state.hwnd && IsSnapCandidate(hwnd);
+}
 
 /////////////////////////////////////////////////////////////////////////
 // Worker Thread, use PostThreadMessage...
@@ -913,6 +916,7 @@ static int ShouldResizeTouching(void)
         );
 }
 #include "linked_grid_win.h"
+#include "auto_tile_grid_win.h"
 
 static void EnumOnce(RECT **bd);
 static int ResizeTouchingWindows(LPVOID lwptr)
@@ -6382,6 +6386,12 @@ LRESULT CALLBACK HooksWinPorc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             UNPACK_ACTION(action, lParam);
             assert(wParam - 0x1000 == action.ac);
             ptwindow = 1;
+        }
+
+        if (action.ac == AC_AUTOTILEGRID) {
+            POINT cursor;
+            if (GetCursorPos(&cursor)) AutoTileGrid(cursor);
+            return 0;
         }
 
         if (action.ac > AC_RESIZE) { // Exclude resize action in case...

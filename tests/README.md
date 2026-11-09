@@ -7,7 +7,7 @@ make -C tests test
 ```
 
 This builds `linked_grid.c`, the owner-queue policy in `linked_grid_queue.h`,
-and their framework-free C99 tests. It neither
+the recovery policy, `auto_tile_grid.c` and their framework-free C99 tests. It neither
 builds nor starts AltSnap. Outputs go to ignored `work/linked-grid-tests/`.
 Warnings are errors. To check address and undefined behaviour sanitizers:
 
@@ -62,3 +62,6 @@ no OS APIs. The hooks.c adapter selects eligible
 windows from the same monitor and maps HWNDs, frame bounds and track limits to
 the pure geometry API. Tolerance and gaps remain unsupported. The Win32 adapter is documented in [LINKED_GRID_INTEGRATION.md](LINKED_GRID_INTEGRATION.md);
 portable tests do not exercise Windows GUI behavior. Old compiler support before C99 is not established.
+
+AutoTileGrid usage, conservative eligibility, automated coverage, and the pending
+Windows GUI checklist are documented in [AUTO_TILE_GRID.md](../AUTO_TILE_GRID.md).

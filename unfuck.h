@@ -1635,7 +1635,7 @@ static int IsWindowSnapped(HWND hwnd)
 }
 
 /* Helper function to get the Min and Max tracking sizes */
-static void GetMinMaxInfoF(HWND hwnd, POINT *Min, POINT *Max, UCHAR flags)
+static BOOL GetMinMaxInfoF(HWND hwnd, POINT *Min, POINT *Max, UCHAR flags)
 {
     MINMAXINFO mmi;
     UINT dpi = GetDpiForWindow(hwnd);
@@ -1648,11 +1648,12 @@ static void GetMinMaxInfoF(HWND hwnd, POINT *Min, POINT *Max, UCHAR flags)
     *Max = mmi.ptMaxTrackSize;
     if ((flags&3) != 3) {
         DWORD_PTR ret; /* 32ms timeout */
-        SendMessageTimeout(hwnd, WM_GETMINMAXINFO, 0, (LPARAM)&mmi, SMTO_ABORTIFHUNG, 32, &ret);
+        BOOL ok = !!SendMessageTimeout(hwnd, WM_GETMINMAXINFO, 0, (LPARAM)&mmi, SMTO_ABORTIFHUNG, 32, &ret);
         if(!(flags&1)) *Min = mmi.ptMinTrackSize;
         if(!(flags&2)) *Max = mmi.ptMaxTrackSize;
+        return ok; /* Strict callers can reject a timeout/UIPI failure. */
     }
-
+    return TRUE;
 }
 
 static xpure int SamePt(const POINT a, const POINT b)
