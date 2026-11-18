@@ -36,7 +36,7 @@ validated name, AltSnap.exe is excluded even through the fallback, unreadable
 identities stay excluded, and the general blacklist/cache helper cannot be used
 for those list decisions. An unreadable identity takes precedence over blacklist
 matching. All 16 owned-window POPUP/APPWINDOW/TOOLWINDOW/maximized combinations
-still refuse. Existing 1–4-window layouts, five-window refusal, maximize/restore,
+still refuse. Existing 1–4-window layouts, 5–8-window layouts, nine-window refusal, maximize/restore,
 rollback and Linked Grid Resize checks remain. Tests cover all 30 constituent
 skip reasons, zero extra diagnostic reads with tracing off, and 1,000 routine
 exclusions reduced to one count per capture.

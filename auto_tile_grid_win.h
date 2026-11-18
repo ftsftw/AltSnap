@@ -11,11 +11,11 @@ typedef struct {
     ATGOwnedOperation *owned;
     HMONITOR monitor;
     MONITORINFO mi;
-    ATGWindow windows[4];
-    HWND hwnd[4];
-    DWORD pid[4], tid[4];
-    RECT native[4];
-    WINDOWPLACEMENT placement[4];
+    ATGWindow windows[ATG_MAX_WINDOWS];
+    HWND hwnd[ATG_MAX_WINDOWS];
+    DWORD pid[ATG_MAX_WINDOWS], tid[ATG_MAX_WINDOWS];
+    RECT native[ATG_MAX_WINDOWS];
+    WINDOWPLACEMENT placement[ATG_MAX_WINDOWS];
     UINT dpi;
     unsigned count;
     int failed;
@@ -498,22 +498,24 @@ static void AutoTileGridRun(HMONITOR monitor, const ATGSelectedOwned *selected,
                              ATGOwnedOperation *owned, HWND foreground, unsigned axes)
 {
     static int busy;
-    ATGSnapshot before, live, check;
+    ATGSnapshot before, live, *check;
     ATGPlan plan;
-    RECT target[4];
+    RECT target[ATG_MAX_WINDOWS];
     unsigned i, changed = 0, restore_mask = 0;
     HDWP batch;
     int ok;
     LONG generation = MovementGeneration();
     if (busy || !monitor || !AutoTileIdle()) { AutoTileTrace("busy-or-no-monitor", 0); return; }
     busy = 1;
+    check = (ATGSnapshot *)malloc(sizeof *check);
+    if (!check) { AutoTileTrace("snapshot-allocation-failed", 0); goto done; }
     if (!AutoTileCaptureOwned(monitor, &before, selected, owned)) { AutoTileTrace("capture", 0); goto done; }
     if (axes) {
         if (before.count != 4 || GetForegroundWindow() != foreground) goto done;
         for (i = 0; i < before.count; ++i)
             if (before.placement[i].showCmd != SW_SHOWNORMAL) goto done;
     }
-    if (!AutoTileCaptureOwned(monitor, &check, selected, owned) || !AutoTileUnchanged(&before, &check)
+    if (!AutoTileCaptureOwned(monitor, check, selected, owned) || !AutoTileUnchanged(&before, check)
         || !AutoTileBaselines(&before, generation)) {
         AutoTileTrace("preflight-changed", before.count); goto done;
     }
@@ -536,41 +538,44 @@ static void AutoTileGridRun(HMONITOR monitor, const ATGSelectedOwned *selected,
     }
     /* Re-read normal frame insets, DPI and limits, not maximized insets. Timed
        min/max callbacks can change any participant; validate the witnesses too. */
-    if (restore_mask && (!AutoTileCaptureOwned(monitor, &check, selected, owned) || check.count != before.count
+    if (restore_mask && (!AutoTileCaptureOwned(monitor, check, selected, owned) || check->count != before.count
         || !AutoTileBaselines(&live, generation))) {
         AutoTileTrace("normalized-capture-changed", before.count); goto rollback;
     }
-    for (i = 0; i < check.count; ++i) {
+    for (i = 0; i < check->count; ++i) {
         unsigned j;
-        for (j = 0; j < live.count && check.hwnd[i] != live.hwnd[j]; ++j) { }
-        if (j == live.count || check.pid[i] != live.pid[j] || check.tid[i] != live.tid[j]
-            || check.placement[i].showCmd != SW_SHOWNORMAL
-            || !EqualRect(&check.native[i], &live.native[j])
-            || !AutoTileSamePlacement(&check.placement[i], &live.placement[j])
-            || !AutoTileSameRect(check.windows[i].window.rect, live.windows[j].window.rect))
+        for (j = 0; j < live.count && check->hwnd[i] != live.hwnd[j]; ++j) { }
+        if (j == live.count || check->pid[i] != live.pid[j] || check->tid[i] != live.tid[j]
+            || check->placement[i].showCmd != SW_SHOWNORMAL
+            || !EqualRect(&check->native[i], &live.native[j])
+            || !AutoTileSamePlacement(&check->placement[i], &live.placement[j])
+            || !AutoTileSameRect(check->windows[i].window.rect, live.windows[j].window.rect))
             goto rollback;
     }
     /* Preserve original index order for rollback; recapture once more to test
        the normalized plan's frame and size limits for stability. */
     if (axes) {
-        for (i = 0; i < check.count && check.hwnd[i] != foreground; ++i) { }
+        for (i = 0; i < check->count && check->hwnd[i] != foreground; ++i) { }
         ok = GetForegroundWindow() == foreground
-            && atg_expand(check.windows, check.count, i, AutoTileRect(check.mi.rcWork), axes, &plan);
-    } else ok = atg_plan(check.windows, check.count, AutoTileRect(check.mi.rcWork), &plan);
+            && atg_expand(check->windows, check->count, i, AutoTileRect(check->mi.rcWork), axes, &plan);
+    } else ok = atg_plan(check->windows, check->count, AutoTileRect(check->mi.rcWork), &plan);
     if (!ok) {
-        AutoTileTrace("no-feasible-plan", check.count); goto rollback;
+        AutoTileTrace("no-feasible-plan", check->count); goto rollback;
     }
     if (restore_mask) {
-        ATGSnapshot stable;
-        if (!AutoTileCaptureOwned(monitor, &stable, selected, owned) || !AutoTileUnchanged(&check, &stable)
-            || !AutoTileBaselines(&live, generation)) {
+        ATGSnapshot *stable = (ATGSnapshot *)malloc(sizeof *stable);
+        if (!stable) { AutoTileTrace("snapshot-allocation-failed", before.count); goto rollback; }
+        ok = AutoTileCaptureOwned(monitor, stable, selected, owned)
+            && AutoTileUnchanged(check, stable) && AutoTileBaselines(&live, generation);
+        free(stable);
+        if (!ok) {
             AutoTileTrace("normalized-preflight-changed", before.count); goto rollback;
         }
     }
-    for (i = 0; i < check.count; ++i) {
+    for (i = 0; i < check->count; ++i) {
         unsigned j, idx = (unsigned)plan.indices[i];
         LGRect r = plan.native[i];
-        for (j = 0; j < before.count && before.hwnd[j] != check.hwnd[idx]; ++j) { }
+        for (j = 0; j < before.count && before.hwnd[j] != check->hwnd[idx]; ++j) { }
         SetRect(&target[j], r.left, r.top, r.right, r.bottom);
         changed += !EqualRect(&target[j], &live.native[j]);
     }
@@ -602,9 +607,9 @@ static void AutoTileGridRun(HMONITOR monitor, const ATGSelectedOwned *selected,
         restore_mask |= 1u << i;
         if (!EqualRect(&live.native[i], &target[i])) ok = 0;
     }
-    for (i = 0; i < check.count; ++i) {
+    for (i = 0; i < check->count; ++i) {
         unsigned j, idx = (unsigned)plan.indices[i];
-        for (j = 0; j < before.count && before.hwnd[j] != check.hwnd[idx]; ++j) { }
+        for (j = 0; j < before.count && before.hwnd[j] != check->hwnd[idx]; ++j) { }
         if (!AutoTileSameRect(live.windows[j].window.rect, plan.visible[i])) ok = 0;
     }
     if (!AutoTileIdle() || generation != MovementGeneration()) {
@@ -620,6 +625,7 @@ success:
 rollback:
     AutoTileRollback(&before, &live, restore_mask, generation);
 done:
+    free(check);
     busy = 0;
 }
 

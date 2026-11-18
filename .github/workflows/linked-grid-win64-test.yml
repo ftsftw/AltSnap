@@ -6,17 +6,18 @@ on:
     branches:
       - feat/linked-grid-resize
       - feat/auto-tile-grid
+      - feat/auto-tile-grid-8
 
 permissions:
   contents: read
 
 jobs:
   build:
-    if: github.ref == 'refs/heads/feat/linked-grid-resize' || github.ref == 'refs/heads/feat/auto-tile-grid'
+    if: github.ref == 'refs/heads/feat/linked-grid-resize' || github.ref == 'refs/heads/feat/auto-tile-grid' || github.ref == 'refs/heads/feat/auto-tile-grid-8'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      PACKAGE_NAME: ${{ github.ref == 'refs/heads/feat/auto-tile-grid' && 'AltSnap-auto-tile-win64-test' || 'AltSnap-linked-grid-win64-test' }}
+      PACKAGE_NAME: ${{ (github.ref == 'refs/heads/feat/auto-tile-grid' || github.ref == 'refs/heads/feat/auto-tile-grid-8') && 'AltSnap-auto-tile-win64-test' || 'AltSnap-linked-grid-win64-test' }}
     steps:
       - uses: actions/checkout@v4
         with:

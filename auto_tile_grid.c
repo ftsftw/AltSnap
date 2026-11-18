@@ -18,15 +18,15 @@ static int atg_native(LGRect cell, LGRect border, LGRect *native)
 int atg_plan(const ATGWindow *windows, size_t count, LGRect work, ATGPlan *plan)
 {
     ATGPlan best = { { 0 }, { { 0, 0, 0, 0 } }, { { 0, 0, 0, 0 } } };
-    LGRect cells[4];
-    size_t order[4], p[4], i, j;
+    LGRect cells[ATG_MAX_WINDOWS];
+    size_t order[ATG_MAX_WINDOWS], p[ATG_MAX_WINDOWS], i, j;
     int64_t width = (int64_t)work.right - work.left;
     int64_t height = (int64_t)work.bottom - work.top;
     int64_t best_cost = INT64_MAX;
     int32_t x, y;
     int more = 1;
-    if (!windows || !plan || count < 1 || count > 4
-        || width < (count > 1 ? 2 : 1) || height < (count > 2 ? 2 : 1)
+    if (!windows || !plan || count < 1 || count > ATG_MAX_WINDOWS
+        || width < (count >= 7 ? 4 : count >= 5 ? 3 : count > 1 ? 2 : 1) || height < (count > 2 ? 2 : 1)
         || width > INT32_MAX || height > INT32_MAX) return 0;
     x = (int32_t)((int64_t)work.left + width / 2);
     y = (int32_t)((int64_t)work.top + height / 2);
@@ -42,6 +42,18 @@ int atg_plan(const ATGWindow *windows, size_t count, LGRect work, ATGPlan *plan)
         cells[0].bottom = cells[1].bottom = y;
         cells[2] = (LGRect){ work.left, y, x, work.bottom };
         cells[3] = (LGRect){ x, y, work.right, work.bottom };
+    }
+    if (count >= 5) {
+        size_t cols = count >= 7 ? 4 : 3;
+        for (i = 0; i < cols; ++i) {
+            int32_t left = (int32_t)((int64_t)work.left + width * (int64_t)i / (int64_t)cols);
+            int32_t right = (int32_t)((int64_t)work.left + width * (int64_t)(i + 1) / (int64_t)cols);
+            cells[i] = (LGRect){ left, work.top, right, y };
+            if (i < count - cols) {
+                if (i == count - cols - 1) right = work.right;
+                cells[cols + i] = (LGRect){ left, y, right, work.bottom };
+            }
+        }
     }
     for (i = 0; i < count; ++i) {
         const LGWindow *w = &windows[i].window;
@@ -59,7 +71,7 @@ int atg_plan(const ATGWindow *windows, size_t count, LGRect work, ATGPlan *plan)
             size_t tmp = order[j]; order[j] = order[j-1]; order[j-1] = tmp;
         }
     }
-    /* At most 24 permutations, visited in key order. */
+    /* At most 40320 permutations, visited in key order. */
     while (more) {
         ATGPlan next = best;
         int64_t cost = 0;
@@ -103,7 +115,7 @@ int atg_expand(const ATGWindow *windows, size_t count, size_t active,
 {
     LGWindow w[4];
     LGResult grid;
-    ATGPlan next;
+    ATGPlan next = { { 0 }, { { 0, 0, 0, 0 } }, { { 0, 0, 0, 0 } } };
     LGRect a;
     size_t i, j;
     unsigned q;

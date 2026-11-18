@@ -124,8 +124,8 @@ static struct FakeWindow {
     POINT lo, hi;
     const char *class_override, *path_override;
     int root_self;
-} fake[6], fake_owner, fake_owner2;
-static RECT targets[6];
+} fake[10], fake_owner, fake_owner2;
+static RECT targets[10];
 static unsigned batch_mask;
 static struct FakeWindow *win(HWND w) {
     if (w==102) { ++owner_queries; return &fake_owner; }
@@ -362,7 +362,7 @@ static BOOL EnumWindows(BOOL (*callback)(HWND,LPARAM), LPARAM lp)
     return 1;
 }
 static HMONITOR MonitorFromPoint(POINT p, int flags) { (void)flags; return p.x<1200 ? 1 : 2; }
-static HDWP BeginDeferWindowPos(unsigned n) { assert(n>=1 && n<=4); batch_mask=0; return fail_begin ? 0 : 1; }
+static HDWP BeginDeferWindowPos(unsigned n) { assert(n>=1 && n<=8); batch_mask=0; return fail_begin ? 0 : 1; }
 static HDWP DeferWindowPos(HDWP b, HWND w, void *after, LONG x, LONG y, LONG cx, LONG cy, int flags)
 {
     assert(!after && flags==(SWP_NOACTIVATE|SWP_NOZORDER|SWP_NOOWNERZORDER));
@@ -565,15 +565,22 @@ static void unchanged(void)
 static void layouts_and_refusals(void)
 {
     unsigned n,i;
-    for (n=0;n<=5;++n) {
+    for (n=0;n<=9;++n) {
         reset(n); invoke();
-        if (!n || n>4) { assert(!positions); unchanged(); continue; }
+        if (!n || n>8) { assert(!positions); unchanged(); continue; }
         assert(positions==n && clears==n && !restores);
         for (i=0;i<n;++i) {
             RECT r; assert(!DwmGetWindowAttributeL(i+1,9,&r,sizeof r));
             assert(r.left>=0 && r.right<=1200 && r.top>=0 && r.bottom<=960);
         }
         invoke(); assert(positions==n && batches==1); /* Fixed point. */
+    }
+    for (n=5;n<=8;++n) {
+        reset(n); fake[n-1].lo.x=1201; invoke(); unchanged(); assert(!positions);
+        reset(n); fake[n-1].hi.y=400; invoke(); unchanged(); assert(!positions);
+        reset(n); fake[n-1].dpi=120; invoke(); unchanged(); assert(!positions);
+        reset(n); fake[n-1].behavior=1; invoke(); unchanged(); assert(!clears && restores==n);
+        reset(n); fail_defer=1; invoke(); unchanged(); assert(!clears);
     }
     reset(4); fake[2].lo.x=800; invoke(); assert(!positions); unchanged();
     reset(4); fake[2].hi.y=400; invoke(); assert(!positions); unchanged();
@@ -669,9 +676,10 @@ static void maximized_and_overhang(void)
         if (kind) assert(frame_reads_after_normalize);
         i=positions; invoke(); assert(positions==i); /* Normalized fixed point. */
     }
+    for (n=5;n<=8;++n) { reset(n); for(i=0;i<n;i+=2) maximize(i); reverse_enum=1; invoke(); assert(clears==n && !restores); i=positions; invoke(); assert(positions==i); }
     reset(4); maximize(0); maximize(2); reverse_enum=1; invoke();
     assert(clears==4 && !max_restores && normalizes==2);
-    reset(5); for(i=0;i<5;++i) maximize(i);
+    reset(9); for(i=0;i<9;++i) maximize(i);
     invoke(); unchanged(); assert(!normalizes && !positions);
     for (kind=0;kind<4;++kind) {
         reset(4);
@@ -803,7 +811,7 @@ static void diagnostic_trace(void)
     /* A process blacklist cannot be bypassed by a failed name lookup. */
     reset(1); fake[0].blacklisted=fake[0].name_fail=1; auto_tile_trace=1; invoke();
     assert(strstr(trace_log,"skip-process-unreadable") && traced_process_calls && !positions);
-    reset(5); auto_tile_trace=1; invoke(); assert(strstr(trace_log,"reason=too-many"));
+    reset(9); auto_tile_trace=1; invoke(); assert(strstr(trace_log,"reason=too-many"));
     reset(4); auto_tile_trace=1; fake[1].dpi=120; invoke();
     assert(strstr(trace_log,"reason=dpi-rect-limits"));
     reset(2); auto_tile_trace=1; maximize(0); fake[1].behavior=1; invoke();
@@ -969,7 +977,7 @@ static void owner_topology_trace(void)
     for (enabled=0;enabled<=1;++enabled) for (maximized=0;maximized<=1;++maximized)
     for (kind=0;kind<5;++kind) {
         unsigned i, full_height=0, half_height=0;
-        reset(kind==4 ? 6 : 4); auto_tile_trace=(int)enabled; fake[count-1].owned=1;
+        reset(kind==4 ? 10 : 4); auto_tile_trace=(int)enabled; fake[count-1].owned=1;
         if (maximized) maximize(count-1);
         if (kind==1) fake[1].behavior=1;
         if (kind==2) fake[1].blacklisted=1;
@@ -1111,7 +1119,7 @@ static void explicitly_selected_owned(void)
             selected_setup(4,trace); fake[1].blacklisted=(int)kind;
             invoke_selected(); assert(positions==3 && EqualRect(&fake[1].native,&fake[1].original));
         }
-        selected_setup(5,trace); maximize(0); invoke_selected(); unchanged(); assert(!normalizes && !positions);
+        selected_setup(9,trace); maximize(0); invoke_selected(); unchanged(); assert(!normalizes && !positions);
         for (kind=0;kind<6;++kind) for (mask=0;mask<2;++mask) {
             selected_setup(4,trace); if (mask) maximize(0);
             if (kind==0) fake[0].behavior=1; /* +107 px correction by chosen surface. */
@@ -1198,8 +1206,8 @@ static void ordinary_owned_refusals(void)
 {
     unsigned trace, n, show, focus, role, kind;
     for (trace=0;trace<=1;++trace)
-    for (n=1;n<=6;++n) {
-        if (n==2 || n==3) continue;
+    for (n=1;n<=10;++n) {
+        if (n==2 || n==3 || (n>=6 && n<=9)) continue;
         for (show=0;show<3;++show) for (focus=0;focus<3;++focus)
         for (role=0;role<8;++role) {
             selected_setup(n,trace);
@@ -1225,7 +1233,7 @@ static void ordinary_owned_refusals(void)
             assert(AutoTileSamePlacement(&fake[0].placement,&fake[0].original_placement));
             assert(!normalizes && !max_restores && !foreground_queries && !selected_scans);
             if (n<=5) assert(positions==n-1 && clears==n-1);
-            else { unchanged(); assert(!positions && !clears); } /* Five eligible peers. */
+            else { unchanged(); assert(!positions && !clears); } /* Nine eligible peers. */
             if (!trace) assert(!trace_lines && !owner_queries && !diagnostic_queries && !traced_process_calls);
             assert(!strstr(trace_log,"TMobaXtermForm") && !strstr(trace_log,"MobaXterm.exe")
                    && !strstr(trace_log,"OtherApplication.exe") && !strstr(trace_log,"TModelessDialog"));
@@ -1410,7 +1418,7 @@ static void registered_profile_layouts(void)
             assert(ATGOwnedProfileSave("test.ini",1,&p) && ATGOwnedProfileEnable("test.ini",1,1));
             AutoTileOwnedLoad("test.ini"); invoke(); unchanged(); assert(!positions);
         }
-        profile_setup(5,trace,1); maximize(0); invoke(); unchanged(); assert(!positions && !normalizes);
+        profile_setup(9,trace,1); maximize(0); invoke(); unchanged(); assert(!positions && !normalizes);
         for(kind=0;kind<4;++kind) for(mask=0;mask<2;++mask) {
             profile_setup(4,trace,1); if(mask) maximize(0);
             if(kind==0) fake[0].behavior=1;
@@ -1489,7 +1497,7 @@ static void registered_minimized_layouts(void)
     for (trace=0;trace<=1;++trace) {
         /* Presence and participation differ. A fresh invocation restores
            participation automatically, without foreground or new enrollment. */
-        for (peers=0;peers<=4;++peers) {
+        for (peers=0;peers<=8;++peers) {
             profile_setup(peers+1,trace,1);
             for (cycle=0;cycle<6;++cycle) {
                 unsigned moved=positions, cleared=clears;
@@ -1500,11 +1508,11 @@ static void registered_minimized_layouts(void)
                 }
                 fake[0].iconic=inactive;
                 invoke();
-                if (inactive || peers<4) {
+                if (inactive || peers<8) {
                     unsigned expected=peers+!inactive;
                     assert(positions==moved+expected && clears==cleared+expected);
-                } else assert(positions==moved && clears==cleared); /* Five active. */
-                if (inactive || peers==4) assert(EqualRect(&fake[0].native,&fake[0].original));
+                } else assert(positions==moved && clears==cleared); /* Nine active. */
+                if (inactive || peers==8) assert(EqualRect(&fake[0].native,&fake[0].original));
                 assert(!normalizes && !restores && !foreground_queries && !image_live);
                 assert(image_opens==image_closes);
                 if (!trace) assert(!trace_lines);
@@ -1747,7 +1755,7 @@ int main(void)
     explicitly_selected_owned();
     owned_role_ambiguity(); ordinary_owned_refusals();
     profile_store_tests(); registered_profile_layouts(); registered_minimized_regression(); registered_minimized_layouts();
-    puts("auto_tile_grid_minimized_profiles: inactive witnesses, 1-4 peers, repeated restore, state/identity races, dialogs, mixed profiles and rollback passed (no Windows GUI)");
+    puts("auto_tile_grid_minimized_profiles: inactive witnesses, 1-8 peers, repeated restore, state/identity races, dialogs, mixed profiles and rollback passed (no Windows GUI)");
     puts("auto_tile_grid_profiles: disabled consent persistence, build/class checks, foreground-independent layouts, ambiguous/dialog refusals and guarded rollback passed");
     puts("auto_tile_grid_owned_roles: synthetic EXE/class role collision, ordinary focus-independent owner refusal, dialog states, peers and rollback passed (no implicit admission without registered consent)");
     puts("auto_tile_grid_selected: one-shot selection, strict guards, modal/modeless dialogs, stale identities, blacklists, five windows and guarded rollback passed (no Windows GUI)");

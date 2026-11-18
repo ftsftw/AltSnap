@@ -52,12 +52,12 @@ static void layouts(void)
 {
     static const LGRect work[] = {
         { 0, 0, 1920, 1040 }, { -1921, -1081, 0, -40 },
-        { -701, 311, 800, 1312 }, { 1, 3, 4, 6 }
+        { -701, 311, 800, 1312 }, { 1, 3, 5, 6 }
     };
     size_t m, n, i;
     for (m = 0; m < sizeof work / sizeof work[0]; ++m) {
-        for (n = 1; n <= 4; ++n) {
-            ATGWindow w[4];
+        for (n = 1; n <= 8; ++n) {
+            ATGWindow w[8];
             ATGPlan p;
             LGRect mon = work[m];
             int32_t x = mon.left + (mon.right - mon.left) / 2;
@@ -68,13 +68,23 @@ static void layouts(void)
             assert(p.visible[0].left == mon.left && p.visible[0].top == mon.top);
             assert(p.visible[n-1].right == mon.right && p.visible[n-1].bottom == mon.bottom);
             if (n == 1) assert(rect_equal(p.visible[0], mon));
-            if (n >= 2) {
+            if (n >= 2 && n <= 4) {
                 assert(p.visible[0].right == x && p.visible[1].left == x);
                 assert(p.visible[0].bottom == (n == 4 ? y : mon.bottom));
             }
             if (n == 3) {
                 assert(p.visible[1].bottom == y && p.visible[2].top == y);
                 assert(p.visible[2].left == x);
+            }
+            if (n >= 5) {
+                size_t cols = n >= 7 ? 4 : 3;
+                for (i = 0; i < cols; ++i) {
+                    assert(p.visible[i].left == mon.left + (mon.right-mon.left)*(int)i/(int)cols);
+                    assert(p.visible[i].right == mon.left + (mon.right-mon.left)*(int)(i+1)/(int)cols);
+                    assert(p.visible[i].bottom == y);
+                }
+                for (i = cols; i < n; ++i) assert(p.visible[i].top == y);
+                if (n & 1) assert(p.visible[n-1].left == p.visible[cols-2].left);
             }
             if (n == 4) {
                 assert(p.visible[0].bottom == y && p.visible[1].bottom == y);
@@ -87,16 +97,16 @@ static void layouts(void)
 
 static void failures(void)
 {
-    ATGWindow w[5];
+    ATGWindow w[9];
     ATGPlan p, sentinel;
     LGRect work = { 0, 0, 1000, 800 };
     size_t i;
-    for (i = 0; i < 5; ++i) w[i] = window_at(work, i + 1);
+    for (i = 0; i < 9; ++i) w[i] = window_at(work, i + 1);
     memset(&sentinel, 0xa5, sizeof sentinel);
     p = sentinel;
 #define REFUSE(expr) do { assert(!(expr)); assert(!memcmp(&p, &sentinel, sizeof p)); } while (0)
     REFUSE(atg_plan(w, 0, work, &p));
-    REFUSE(atg_plan(w, 5, work, &p));
+    REFUSE(atg_plan(w, 9, work, &p));
     REFUSE(atg_plan(NULL, 1, work, &p));
     assert(!atg_plan(w, 1, work, NULL));
     REFUSE(atg_plan(w, 1, (LGRect){ 0, 0, 0, 1 }, &p));
@@ -167,8 +177,8 @@ static void assignment_and_repeats(void)
 {
     LGRect work = { -801, 0, 800, 901 };
     size_t n, i, trial;
-    for (n = 1; n <= 4; ++n) {
-        ATGWindow w[4], laid[4], permuted[4];
+    for (n = 1; n <= 8; ++n) {
+        ATGWindow w[8], laid[8], permuted[8];
         ATGPlan first, again;
         for (i = 0; i < n; ++i) w[i] = window_at(work, 10 - i);
         assert(atg_plan(w, n, work, &first));
@@ -179,7 +189,7 @@ static void assignment_and_repeats(void)
             laid[i].window.rect = first.visible[i];
         }
         /* Enumerate every ordering, including changed Z-order after a repeat. */
-        for (trial = 0; trial < 256; ++trial) {
+        for (trial = 0; trial < (n <= 4 ? 256u : 12u); ++trial) {
             size_t code = trial, used = 0;
             for (i = 0; i < n; ++i) {
                 size_t idx = code % n;

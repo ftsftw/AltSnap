@@ -9,13 +9,16 @@ typedef struct {
     uintptr_t key;               /* Unique stable identity, independent of Z-order. */
 } ATGWindow;
 
+enum { ATG_MAX_WINDOWS = 8 };
+
 typedef struct {
-    size_t indices[4];           /* Input indices in cell order. */
-    LGRect visible[4], native[4];
+    size_t indices[ATG_MAX_WINDOWS];           /* Input indices in cell order. */
+    LGRect visible[ATG_MAX_WINDOWS], native[ATG_MAX_WINDOWS];
 } ATGPlan;
 
-/* Pure, bounded planner; no OS calls or allocations. Count must be 1..4.
-   Cells: full; L/R; L/RT/RB; TL/TR/BL/BR. Odd spare pixels go right/bottom.
+/* Pure, bounded planner; no OS calls or allocations. Count must be 1..8.
+   Cells: full; L/R; L/RT/RB; TL/TR/BL/BR; then 3x2 or 4x2, with the last bottom cell
+   spanning two columns for odd counts. Odd spare pixels go right/bottom.
    Among feasible assignments, minimize summed Manhattan distance of doubled
    window/cell centers. Ties use ascending stable keys in cell order. Exact
    layouts are fixed points even if enumeration order changes. Limits are
