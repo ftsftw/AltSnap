@@ -11,7 +11,7 @@ rm -rf "$stage"
 mkdir -p "$stage/Lang"
 test -s AltSnap.exe
 test -s hooks.dll
-cp AltSnap.exe hooks.dll License.txt "$stage/"
+cp maximize-diagnostic.exe MAXIMIZE_DIAGNOSTIC_RU.md AltSnap.exe hooks.dll License.txt "$stage/"
 # The repository mixes UTF-16 blobs with normalized UTF-8 language blobs.
 # Checkout conversion reports errors for the former, and depends on Git/iconv.
 # Read committed text explicitly and always ship Windows-readable UTF-16LE+BOM.
@@ -52,7 +52,7 @@ archive = pathlib.Path(sys.argv[1])
 with zipfile.ZipFile(archive) as z:
     names = set(z.namelist())
     root = sys.argv[2] + '/'
-    required = {root + n for n in ('AltSnap.exe','hooks.dll','AltSnap.ini','License.txt')}
+    required = {root + n for n in ('AltSnap.exe','hooks.dll','AltSnap.ini','License.txt','maximize-diagnostic.exe','MAXIMIZE_DIAGNOSTIC_RU.md')}
     if sys.argv[2] == 'AltSnap-auto-tile-win64-test':
         required.add(root + 'AUTO_TILE_GRID.md')
         required.add(root + 'GRID_KEYBOARD_TEST_BUILD_RU.md')
