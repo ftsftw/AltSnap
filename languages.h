@@ -175,6 +175,14 @@ struct langinfoitem {
   LNGVALUE(InputHotkeysWinkey,         TEXT("Winkey"), NULL) \
   LNGVALUE(InputHotkeysCtrl,           TEXT("Ctrl"), NULL) \
   LNGVALUE(InputHotkeysShift,          TEXT("Shift"), NULL) \
+  LNGVALUE(InputActionAutoTileGrid, TEXT("Tile windows evenly"), NULL) \
+  LNGVALUE(InputActionAutoTileExpandBoth, TEXT("Grid: expand both"), NULL) \
+  LNGVALUE(InputActionAutoTileExpandHorizontal, TEXT("Grid: expand width"), NULL) \
+  LNGVALUE(InputActionAutoTileExpandVertical, TEXT("Grid: expand height"), NULL) \
+  LNGVALUE(ShortcutDuplicate, TEXT("These keys are already assigned to another AltSnap action. Clear or change that shortcut first."), NULL) \
+  LNGVALUE(ShortcutRegisterFailed, TEXT("Shortcut is inactive: Windows could not register it. Another application or Windows may reserve these keys. Choose different keys."), NULL) \
+  LNGVALUE(ShortcutSaveFailed, TEXT("Could not save and verify the shortcut in AltSnap.ini. Check file access and try again."), NULL) \
+  LNGVALUE(ShortcutInvalidAction, TEXT("Select an action from the list before saving a shortcut."), NULL) \
   LNGVALUE(InputHotkeysShortcuts,      TEXT("S&hortcut for action:"), NULL) \
   LNGVALUE(InputHotkeysShortcutsPick,  TEXT("Pick &keys"), NULL) \
   LNGVALUE(InputHotkeysShortcutsClear, TEXT("Clear ke&ys"), NULL) \

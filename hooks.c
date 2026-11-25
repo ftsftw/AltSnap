@@ -7,6 +7,7 @@
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 #include "hooks.h"
+#include "hotkey_maximize.h"
 
 static void SClickActions(HWND hwnd, action_t action);
 static void MoveWindowAsync(HWND hwnd, int x, int y, int w, int h);
@@ -26,6 +27,8 @@ LRESULT CALLBACK HooksWinPorc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 #define WM_DOWORK        (WM_APP+6)
 #define WM_DOMOUSEMOVE   (WM_APP+7)
+#define WM_LG_FINISH     (WM_APP+9)
+#define WM_LG_COMBO      (WM_APP+10)
 #define WM_DOACTION      (WM_APP+8)
 
 enum { BD_HIDDEN_L = 1, BD_HIDDEN_T = 2, BD_HIDDEN_R = 4, BD_HIDDEN_B = 8 };
@@ -50,6 +53,22 @@ static DWORD g_WorkerThreadID;
 static HANDLE g_WorkerThreadHANDLE;
 static UCHAR g_InFinishMovement;
 static UCHAR g_InMouseMove;
+#include "linked_grid_queue.h"
+/* Only the hook-installing thread owns this queue and all linked state. */
+static LGQueue linked_queue;
+static LGMoveSlot linked_move;
+static HWND linked_queue_hwnd;
+static uintptr_t linked_dispatch;
+/* Legacy processing stays on the worker. Atomic tokens reject queued work
+   after a new action/cancel without introducing a legacy admission guard. */
+static volatile LONG movement_generation;
+static LONG MovementGeneration(void)
+{
+    return InterlockedCompareExchange(&movement_generation, 0, 0);
+}
+typedef struct { POINT pt; uintptr_t generation; } LinkedMoveMessage;
+static LRESULT CALLBACK LinkedQueueProc(HWND, UINT, WPARAM, LPARAM);
+static void CancelLinkedQueue(void);
 //static DWORD g_lastKeyboardTick;
 //static HPOWERNOTIFY g_suspendResumeNotificationHANDLE;
 
@@ -204,6 +223,7 @@ static struct config {
     UCHAR Aero;
     UCHAR SmartAero;
     UCHAR StickyResize;
+    UCHAR LinkedGridResize;
     UCHAR InactiveScroll;
     UCHAR MDI;
     UCHAR ResizeCenter;
@@ -312,6 +332,7 @@ static const struct OptionListItem General_uchars[] = {
     { "Aero", 1 },
     { "SmartAero", 1 },
     { "StickyResize", 0 },
+    { "LinkedGridResize", 0 },
     { "InactiveScroll", 0 },
     { "MDI", 0 },
     { "ResizeCenter", 1 },
@@ -679,11 +700,10 @@ static void OffsetRectMDI(RECT *wnd)
 {
     OffsetRect(wnd, -state.mdipt.x, -state.mdipt.y);
 }
-static int ShouldSnapTo(HWND hwnd)
+static int IsSnapCandidate(HWND hwnd)
 {
     LONG_PTR style;
-    return hwnd != state.hwnd
-        && IsVisible(hwnd)
+    return IsVisible(hwnd)
         && !IsIconic(hwnd)
         && !(GetWindowLongPtr(hwnd, GWL_EXSTYLE)&WS_EX_NOACTIVATE) // != WS_EX_NOACTIVATE
         &&( ((style=GetWindowLongPtr(hwnd, GWL_STYLE))&WS_CAPTION) == WS_CAPTION
@@ -693,6 +713,10 @@ static int ShouldSnapTo(HWND hwnd)
         );
 }
 
+static int ShouldSnapTo(HWND hwnd)
+{
+    return hwnd != state.hwnd && IsSnapCandidate(hwnd);
+}
 
 /////////////////////////////////////////////////////////////////////////
 // Worker Thread, use PostThreadMessage...
@@ -721,15 +745,20 @@ static DWORD WINAPI WorkerThread(LPVOID p)
             int skip_count = 0;
             while (PeekMessage(&next_msg, (HWND)(-1), 0, 0, PM_NOREMOVE)) {
                 if (next_msg.message == WM_DOMOUSEMOVE) {
+                    freeL((void *)msg.wParam);
                     PeekMessage(&msg, (HWND)(-1), 0, 0, PM_REMOVE); // Override msg...
                     skip_count++;
                 } else {
                     break;
                 }
             }
-            LOG("WM_DOMOUSEMOVE (%d,%d) skip_count = %d", msg.wParam, msg.lParam, skip_count);
+            LOG("WM_DOMOUSEMOVE skip_count = %d", skip_count);
 
-            POINT pt = { (long)msg.wParam, (long)msg.lParam };
+            LinkedMoveMessage *move = (LinkedMoveMessage *)msg.wParam;
+            POINT pt = move->pt;
+            LONG generation = (LONG)move->generation;
+            free(move);
+            if (generation != MovementGeneration()) continue;
 
             g_InMouseMove = 1;
             MouseMoveNow(pt);
@@ -887,6 +916,11 @@ static int ShouldResizeTouching(void)
           || ((conf.StickyResize&3)==2 && !state.shift)
         );
 }
+#include "linked_grid_win.h"
+#include "auto_tile_owned_store.h"
+#include "auto_tile_owned_image.h"
+#include "auto_tile_grid_win.h"
+
 static void EnumOnce(RECT **bd);
 static int ResizeTouchingWindows(LPVOID lwptr)
 {
@@ -2200,8 +2234,24 @@ static void UpdateCursor(POINT pt);
 static void SetEdgeAndOffset(const RECT *wnd, POINT pt);
 static void MouseMove(POINT pt)
 {
-    if(!g_InFinishMovement)
-        PostThreadMessage(g_WorkerThreadID, WM_DOMOUSEMOVE, pt.x, pt.y);
+    LinkedMoveMessage *move;
+    if (g_InFinishMovement) return;
+    if (conf.LinkedGridResize) {
+        if (linked_queue.closed || !linked_queue_hwnd) return;
+        if (linked_trace && linked.drag.mode != LG_DRAG_LEGACY
+            && linked_trace_offers < INT32_MAX) ++linked_trace_offers;
+        if (lg_move_offer(&linked_move, linked_queue.generation, pt.x, pt.y)
+            && !PostMessage(linked_queue_hwnd, WM_DOMOUSEMOVE, 0, 0)) {
+            linked_move.pending = 0;
+            CancelLinkedQueue();
+        }
+        return;
+    }
+    move = (LinkedMoveMessage *)malloc(sizeof *move);
+    if (!move) return;
+    move->pt = pt;
+    move->generation = (uintptr_t)MovementGeneration();
+    if (!PostThreadMessage(g_WorkerThreadID, WM_DOMOUSEMOVE, (WPARAM)move, 0)) free(move);
 }
 static void MouseMoveNow(POINT pt)
 {
@@ -2210,7 +2260,12 @@ static void MouseMoveNow(POINT pt)
 
     // Check if window still exists
     if (!IsWindow(state.hwnd))
-        { LastWin.hwnd = NULL; UnhookMouse(); return; }
+        { LastWin.hwnd = NULL;
+          if (conf.LinkedGridResize && linked.drag.mode != LG_DRAG_LEGACY) {
+              LinkedTrace("active-missing", -1, 0, 0);
+              HideTransWin();
+          }
+          UnhookMouse(); return; }
 
     // Ensure the point is in its clip rectangle (Windows bug)
     RECT clip;
@@ -2246,6 +2301,43 @@ static void MouseMoveNow(POINT pt)
             was_snapped = IsWindowSnapped(state.hwnd);
             RestoreOldWin(pt, was_snapped, &wnd);
         }
+    }
+    if (conf.LinkedGridResize && linked.drag.mode != LG_DRAG_LEGACY) {
+        if (linked.drag.mode == LG_DRAG_ACTIVE && LinkedGridValid()) {
+            int64_t x = (int64_t)linked.x + pt.x - linked.mouse.x;
+            int64_t y = (int64_t)linked.y + pt.y - linked.mouse.y;
+            LinkedTrace("requested", -1, (int)larger(INT32_MIN, smaller(INT32_MAX, x)),
+                        (int)larger(INT32_MIN, smaller(INT32_MAX, y)));
+            LGStatus status = lg_drag_update(&linked.drag, (int32_t)larger(INT32_MIN, smaller(INT32_MAX, x)),
+                                            (int32_t)larger(INT32_MIN, smaller(INT32_MAX, y)));
+            if (status == LG_OK) {
+                LinkedTrace("solved", -1, linked.drag.pending.x, linked.drag.pending.y);
+                LGRect r = lg_preview_active(&linked.drag);
+                RECT bd = linked.border[linked.drag.quadrant];
+                LastWin.hwnd = state.hwnd;
+                LastWin.x = r.left - bd.left;
+                LastWin.y = r.top - bd.top;
+                LastWin.width = r.right - r.left + bd.left + bd.right;
+                LastWin.height = r.bottom - r.top + bd.top + bd.bottom;
+                if (linked.drag.fullwin) {
+                    if (LastWin.start) NotifySizeMoveStaEnd(state.hwnd, 1);
+                    LastWin.start = 0;
+                    CommitLinkedGrid();
+                    if (!lg_queue_current(&linked_queue, linked_dispatch)) return;
+                } else {
+                    /* pending contains visible DWM bounds. Do not let stale
+                       LastWin fields or WM_SIZING recompute this contour. */
+                    MoveTransWinRaw(r.left, r.top, r.right-r.left, r.bottom-r.top);
+                    if (!lg_queue_current(&linked_queue, linked_dispatch)) return;
+                    if (!IsTransWinVisible()) ShowTransWin(SW_SHOWNA);
+                }
+                if (!lg_queue_current(&linked_queue, linked_dispatch)) return;
+                state.moving = 1;
+            } else LinkedTrace("solve-failed", -1, (int)status, 0);
+        } else lg_drag_stop(&linked.drag);
+        if (linked.drag.mode == LG_DRAG_BLOCKED) HideTransWin();
+        LastWin.hwnd = NULL; /* Never let the legacy finalizer move one cell. */
+        return;
     }
     int posx=0, posy=0, wndwidth=0, wndheight=0;
 
@@ -2850,6 +2942,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
            // eg: DisplayFusion Alt+Tab elevated windows captures AltUp
             HotkeyUp();
         } else if ( IsHotkeyy(vkey, conf.ESCkeys) ) { // USER PRESSED ESCAPE! (vkey == VK_ESCAPE)
+            CancelLinkedQueue();
             // Alsays disable shift and ctrl, in case of Ctrl+Shift+ESC.
             // LogState("ESCAPE KEY WAS PRESSED:\n"); // Debug stuff....
             state.ctrl = 0;
@@ -5052,7 +5145,36 @@ static int xpure DoubleClamp(int ptx, int left, int right, int rwidth)
 }
 /////////////////////////////////////////////////////////////////////////////
 // If we pass buttonX BT_PROBE it will tell us if we pass the blacklist.
+static int init_movement_and_actions_impl(POINT pt, HWND hwnd, action_t action, int buttonX, int ctrlmax);
+static int init_movement_and_actions_mode(POINT pt, HWND hwnd, action_t action, int buttonX, int ctrlmax)
+{
+    int ret;
+    uintptr_t generation;
+    if (!conf.LinkedGridResize) {
+        if (!HIWORD(buttonX) && action.ac != AC_NONE) {
+            InterlockedIncrement(&movement_generation);
+            g_InFinishMovement = 0;
+        }
+        return init_movement_and_actions_impl(pt, hwnd, action, buttonX, ctrlmax);
+    }
+    /* Never wait inside a hook, including reentry from a Win32 API. Probes
+       must not overwrite a captured operation's shared state either. */
+    if (linked_queue.busy || linked_queue.closed || g_InFinishMovement) return 0;
+    if (HIWORD(buttonX) && linked.drag.mode != LG_DRAG_LEGACY && state.action.ac)
+        return 0;
+    linked_queue.busy = 1;
+    if (!HIWORD(buttonX) && action.ac != AC_NONE) lg_queue_invalidate(&linked_queue);
+    generation = linked_queue.generation;
+    ret = init_movement_and_actions_impl(pt, hwnd, action, buttonX, ctrlmax);
+    if (!lg_queue_current(&linked_queue, generation)) lg_drag_stop(&linked.drag);
+    linked_queue.busy = 0;
+    return ret;
+}
 static int init_movement_and_actions(POINT pt, HWND hwnd, action_t action, int buttonX)
+{
+    return init_movement_and_actions_mode(pt, hwnd, action, buttonX, 0);
+}
+static int init_movement_and_actions_impl(POINT pt, HWND hwnd, action_t action, int buttonX, int ctrlmax)
 {
     //RGTICTAC tt; RGTic(&tt);
     LOG("\ninit_movement_and_actions(pt=%d,%d, hwnd=%x, action=%d, button=%d)", pt.x, pt.y, (UINT)(INT_PTR)hwnd, (int)action.ac, buttonX);
@@ -5176,6 +5298,7 @@ static int init_movement_and_actions(POINT pt, HWND hwnd, action_t action, int b
         SetWindowTrans(state.hwnd);
 
         LastWin.start = 1;
+        BeginLinkedGrid(pt);
     } else if (BT_WHEELD <= button  && button <= BT_HWHEELU) {
         // Wheel actions, directly return here
         // because maybe the action will not be done
@@ -5198,7 +5321,13 @@ static int init_movement_and_actions(POINT pt, HWND hwnd, action_t action, int b
         if (state.hittest==2 && button == BT_LMB) return 0;
         state.blockmouseup = 1;
     } else {
-        SClickActions(state.hwnd, action);
+        if (ctrlmax && action.ac == AC_MAXIMIZE) {
+            state.sactiondone = action;
+            LastWin.hwnd = NULL;
+            if (IsResizable(state.hwnd)) HotkeyToggleMaxRestore(state.hwnd);
+        } else {
+            SClickActions(state.hwnd, action);
+        }
         state.blockmouseup = 1; // because the action is done
     }
     // AN ACTION HAS BEEN DONE!!!
@@ -5270,12 +5399,25 @@ static int TitleBarActions(POINT pt, action_t action, enum button button)
 // Called on MouseUp and on AltUp when using GrabWithAlt
 static DWORD WINAPI FinishMovementNow(LPVOID pp)
 {
+    if (!conf.LinkedGridResize && (LONG)(INT_PTR)pp != MovementGeneration()) return 0;
     LOG("FinishMovement");
     //LogState("FinishMovement\n");
     StopSpeedMes();
     ShowSnapLayoutPreview(ZONES_PREV_HIDE);
     //Sleep(5000);
-    if (!conf.FullWin && LastWin.hwnd && state.moving == 1) {
+    int linked_finish = conf.LinkedGridResize && linked.drag.mode != LG_DRAG_LEGACY;
+    int linked_notified = linked_finish && linked.drag.fullwin && state.moving == 1;
+    if (linked_finish) {
+        if (linked.drag.mode == LG_DRAG_ACTIVE && linked.drag.dirty) {
+            if (!linked.drag.fullwin) NotifySizeMoveStaEnd(state.hwnd, 1);
+            CommitLinkedGrid();
+            if (!lg_queue_current(&linked_queue, linked_dispatch)) return 0;
+            if (!linked.drag.fullwin) NotifySizeMoveStaEnd(state.hwnd, 0);
+        }
+        LastWin.hwnd = NULL;
+        lg_drag_stop(&linked.drag);
+    }
+    if (!linked_finish && !conf.FullWin && LastWin.hwnd && state.moving == 1) {
         if (state.action.ac == AC_RESIZE) {
             ResizeAllSnappedWindows();
         }
@@ -5316,8 +5458,10 @@ static DWORD WINAPI FinishMovementNow(LPVOID pp)
     HideTransWin();
 
     // Send WM_EXITSIZEMOVE and EVENT_SYSTEM_MOVESIZEEND
-    if(conf.FullWin && state.moving == 1)
+    if((linked_finish ? linked_notified : conf.FullWin && state.moving == 1))
         NotifySizeMoveStaEnd(state.hwnd, 0);
+
+    if (linked_finish) LinkedTraceGeometry("finish-result", linked.actual);
 
     state.action = k_action_none;
     state.moving = 0;
@@ -5337,7 +5481,14 @@ static DWORD WINAPI FinishMovementNow(LPVOID pp)
 static void FinishMovementAsync(void)
 {
     g_InFinishMovement = 1;
-    PostThreadMessage(g_WorkerThreadID, WM_DOWORK, (WPARAM)FinishMovementNow, 0);
+    if (conf.LinkedGridResize) {
+        if (!linked_queue_hwnd || !PostMessage(linked_queue_hwnd, WM_LG_FINISH,
+                              (WPARAM)linked_queue.generation, 0)) {
+            CancelLinkedQueue();
+        }
+        return;
+    }
+    PostThreadMessage(g_WorkerThreadID, WM_DOWORK, (WPARAM)FinishMovementNow, (LPARAM)MovementGeneration());
 }
 
 
@@ -5346,6 +5497,7 @@ static void FinishMovementAsync(void)
 // TODO: Generalize click combo...
 static void LockMovement(void)
 {
+    CancelLinkedQueue();
     state.moving = CURSOR_ONLY;
     LastWin.hwnd = NULL;
     if(!conf.FullWin) HideTransWin();
@@ -5378,7 +5530,10 @@ static int ClickComboActions(action_t action)
     if (!(conf.MMMaximize&1)) return 0;
     // Maximize/Restore the window if pressing Move, Resize mouse buttons.
     if (state.action.ac == AC_MOVE && action.ac == AC_RESIZE) {
-        PostThreadMessage(g_WorkerThreadID, WM_DOWORK, (WPARAM)DoMoveResizeMaxMinComboAction, 0);
+        if (conf.LinkedGridResize)
+            PostMessage(linked_queue_hwnd, WM_LG_COMBO, (WPARAM)linked_queue.generation, 0);
+        else
+            PostThreadMessage(g_WorkerThreadID, WM_DOWORK, (WPARAM)DoMoveResizeMaxMinComboAction, 0);
         state.blockmouseup = 1;
         return 1;
     }
@@ -5719,9 +5874,74 @@ static void UnhookMouseOnly(void)
     #endif
     mousehook = NULL;
 }
+/* This window belongs to the same thread as the low-level hooks. No worker
+   ever reads/writes linked state. Win32 calls can reenter hooks; busy prevents
+   replacement and generation invalidation prevents a subsequent batch. */
+static void CancelLinkedQueue(void)
+{
+    InterlockedIncrement(&movement_generation);
+    g_InFinishMovement = 0;
+    if (!conf.LinkedGridResize) return;
+    if (linked.drag.mode != LG_DRAG_LEGACY)
+        LinkedTrace("cancel", -1, linked_queue.busy, linked_move.pending);
+    lg_queue_invalidate(&linked_queue);
+    if (linked.drag.mode != LG_DRAG_LEGACY) HideTransWin();
+    lg_drag_stop(&linked.drag);
+}
+static LRESULT CALLBACK LinkedQueueProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    uintptr_t generation;
+    POINT pt = {0, 0};
+    if (msg != WM_DOMOUSEMOVE && msg != WM_LG_FINISH && msg != WM_LG_COMBO)
+        return DefWindowProc(hwnd, msg, wp, lp);
+    if (msg == WM_DOMOUSEMOVE) {
+        int32_t x, y;
+        if (!lg_move_take(&linked_move, &generation, &x, &y)) return 0;
+        pt.x = x; pt.y = y;
+    } else generation = (uintptr_t)wp;
+    if (!lg_queue_current(&linked_queue, generation)) {
+        LinkedTrace("dispatch-stale", -1, (int)(unsigned)generation,
+                    (int)(unsigned)((uint64_t)generation >> 32)); return 0;
+    }
+    /* A nested modal message loop must not execute another movement on the
+       same stack. Fail closed instead of leaving a dropped finish latched. */
+    if (!lg_queue_enter(&linked_queue, generation)) {
+        LinkedTrace("dispatch-busy", -1, (int)msg, 0);
+        CancelLinkedQueue();
+        return 0;
+    }
+    linked_dispatch = generation;
+    if (msg == WM_DOMOUSEMOVE) {
+        if (linked_trace && linked.drag.mode != LG_DRAG_LEGACY) {
+            LinkedTrace("dispatch", -1, pt.x, pt.y);
+            LinkedTrace("offers", -1, (int)linked_trace_offers, 0);
+            linked_trace_offers = 0;
+        }
+        /* Mouse-up is queued behind these samples. Do not discard the last
+           sample merely because its finalizer has already been posted. */
+        UCHAR finishing = g_InFinishMovement;
+        g_InFinishMovement = 0;
+        g_InMouseMove = 1;
+        MouseMoveNow(pt);
+        g_InMouseMove = 0;
+        if (lg_queue_current(&linked_queue, generation)) g_InFinishMovement = finishing;
+    } else if (msg == WM_LG_COMBO) {
+        DoMoveResizeMaxMinComboAction(NULL);
+    } else {
+        if (linked.drag.mode != LG_DRAG_LEGACY)
+            LinkedTrace("finish", -1, linked.drag.fullwin, linked.drag.dirty);
+        FinishMovementNow(NULL);
+        /* Retire also when Alt remains held (no UnhookMouse). */
+        lg_queue_invalidate(&linked_queue);
+        g_InFinishMovement = 0;
+    }
+    linked_queue.busy = 0;
+    return 0;
+}
 static void UnhookMouse(void)
 {
     // Stop action
+    CancelLinkedQueue();
     state.action = k_action_none;
     state.ctrl = 0;
     state.shift = 0;
@@ -6205,6 +6425,22 @@ LRESULT CALLBACK HooksWinPorc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             ptwindow = 1;
         }
 
+        if (action.ac == AC_AUTOTILEEXPANDBOTH
+            || action.ac == AC_AUTOTILEEXPANDHORIZONTAL || action.ac == AC_AUTOTILEEXPANDVERTICAL) {
+            AutoTileExpand(action.ac == AC_AUTOTILEEXPANDBOTH ? ATG_EXPAND_BOTH
+                : action.ac == AC_AUTOTILEEXPANDHORIZONTAL ? ATG_EXPAND_HORIZONTAL : ATG_EXPAND_VERTICAL);
+            return 0;
+        }
+
+        if (action.ac == AC_AUTOTILEGRID || action.ac == AC_AUTOTILEGRIDSELECTED) {
+            POINT cursor;
+            if (GetCursorPos(&cursor)) {
+                if (action.ac == AC_AUTOTILEGRIDSELECTED) AutoTileGridSelected(cursor);
+                else AutoTileGrid(cursor);
+            }
+            return 0;
+        }
+
         if (action.ac > AC_RESIZE) { // Exclude resize action in case...
             POINT pt;
             GetMsgPT(&pt);
@@ -6236,7 +6472,12 @@ LRESULT CALLBACK HooksWinPorc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     //}
                 }
                 state.shift = state.ctrl = 0; // In case...
-                init_movement_and_actions(pt, target_hwnd, action, 0);
+                /* Only registered Maximize shortcuts use the Ctrl workaround.
+                   Keep this per-call so reentry cannot affect mouse/menu actions. */
+                init_movement_and_actions_mode(pt, target_hwnd, action, 0,
+                    HotkeyMaximizeUsesAsync(wParam > 0xC000,
+                        action.ac == AC_MAXIMIZE, LOWORD(lParam),
+                        !!(GetAsyncKeyState(VK_CONTROL) & 0x8000)));
                 state.blockmouseup = 0; // We must not block mouseup in this case...
                 state.ignorept = 0; // Reset...
             }
@@ -6294,6 +6535,17 @@ __declspec(dllexport) void WINAPI Unload(void)
 #if defined(_MSC_VER) && _MSC_VER > 1300
 #pragma comment(linker, "/EXPORT:" __FUNCTION__ "=" __FUNCDNAME__)
 #endif
+
+    CancelLinkedQueue();
+    linked_queue.closed = 1;
+    if (linked_queue_hwnd) {
+        MSG queued;
+        while (PeekMessage(&queued, linked_queue_hwnd, WM_DOMOUSEMOVE, WM_DOMOUSEMOVE, PM_REMOVE)) {}
+        linked_move.pending = 0;
+        DestroyWindow(linked_queue_hwnd);
+        linked_queue_hwnd = NULL;
+        UnregisterClass(TEXT(APP_NAMEA)TEXT("-LinkedQueue"), hinstDLL);
+    }
 
     // UnKook keyboard.
     if (g_keyhook) {
@@ -6594,52 +6846,43 @@ static void CreateTransWin(const TCHAR *inisection)
     }
 }
 
+#include "kb_shortcuts.h"
+
 void registerAllHotkeys(const TCHAR* inipath)
 {
-    LOG("registerAllHotkeys START");
+    TCHAR *inisection = KBShortcutSection(inipath);
+    WORD registered[ARR_SZ(conf.KBShortcutsList)];
+    unsigned idx = 0;
     ChangeWindowMessageFilterExL(g_mainhwnd, WM_HOTKEY, /*MSGFLT_ALLOW*/1, NULL);
-    // MOD_ALT=1, MOD_CONTROL=2, MOD_SHIFT=4, MOD_WIN=8
-    // RegisterHotKey(g_mainhwnd, 0xC000 + AC_KILL,   MOD_ALT|MOD_CONTROL, VK_F4); // F4=73h
-    // Read All shortcuts in the [KBShortcuts] section.
-    TCHAR inisection[1800];
-    GetPrivateProfileSection(TEXT("KBShortcuts"), inisection, ARR_SZ(inisection), inipath);
-
+    if (!inisection) {
+        PostMessage(g_mainhwnd, WM_SHORTCUTERROR, 0, ERROR_INSUFFICIENT_BUFFER);
+        return;
+    }
     conf.UsePtWindow = GetSectionOptionInt(inisection, "UsePtWindow", 0);
-
-    #define ACVALUE(a, b, c) (#b),
-    static const char *action_names[] = { ACTION_MAP };
-    #undef ACVALUE
-
-    int idx = 0;
-    for (const TCHAR *p = inisection; *p && idx < (int)ARR_SZ(conf.KBShortcutsList); p += lstrlen(p)+1) {
-        if(*p == ';') continue;
-
+    for (const TCHAR *p = inisection; *p; p += lstrlen(p)+1) {
         action_t action = MapActionW(p);
-        if (action.ac == AC_NONE) continue;
-
-        const TCHAR *pp = lstrchr(p, TEXT('='));
-        if(!pp) continue;
-
-        WORD HK = strtoi(p = ++pp); // Read HOTKEY
-        if(LOBYTE(HK) && HIBYTE(HK)) {
-            // Lobyte is the virtual key code and hibyte is the mod_key
-            if (RegisterHotKey(g_mainhwnd, 0xC001 + idx, HIBYTE(HK), LOBYTE(HK))) {
-                conf.KBShortcutsList[idx] = action; // Add action to the list
-                LOG("OK registering hotkey %s_%d_%d=%x, [idx=%d]", action_names[action.ac], (int)action.fl, (int)action.wp, (unsigned)HK, (int)idx);
-                idx++;
-            } else {
-                LOG("Error registering hotkey %s=%x", action_names[action.ac], (unsigned)HK);
-                #ifdef LOG_STUFF
-                TCHAR title[76], acN[32];
-                lstrcpy_s(title, ARR_SZ(title), TEXT(APP_NAMEA)TEXT(": unable to register hotkey for action "));
-                str2tchar_s(acN, ARR_SZ(acN)-1, action_names[action.ac]);
-                lstrcat_s(title, ARR_SZ(title), acN);
-                ErrorBox(title);
-                #endif // LOG_STUFF
-            }
+        const TCHAR *eq = lstrchr(p, TEXT('='));
+        unsigned j;
+        DWORD error = 0;
+        WORD hk;
+        if (*p == ';' || action.ac == AC_NONE || !eq) continue;
+        hk = (WORD)strtoi(eq+1);
+        if (!hk) continue;
+        for (j = 0; j < idx && registered[j] != hk; ++j) { }
+        if (!KBShortcutValid(hk)) error = ERROR_INVALID_DATA;
+        else if (j < idx) error = ERROR_HOTKEY_ALREADY_REGISTERED;
+        else if (idx == ARR_SZ(conf.KBShortcutsList)) error = ERROR_NO_MORE_ITEMS;
+        else if (!RegisterHotKey(g_mainhwnd, 0xC001 + idx, HIBYTE(hk), LOBYTE(hk))) {
+            error = GetLastError();
+            if (!error) error = ERROR_HOTKEY_ALREADY_REGISTERED;
+        }
+        if (error) PostMessage(g_mainhwnd, WM_SHORTCUTERROR, MAKEWPARAM(action.ac, hk), error);
+        else {
+            conf.KBShortcutsList[idx] = action;
+            registered[idx++] = hk;
         }
     }
-    LOG("registerAllHotkeys END");
+    free(inisection);
 }
 static void readalluchars(UCHAR *dest, const TCHAR * const inisection, const struct OptionListItem *optlist, size_t listlen)
 {
@@ -6717,6 +6960,12 @@ __declspec(dllexport) WNDPROC WINAPI Load(HWND mainhwnd, const TCHAR *inipath)
     // [General]
     GetPrivateProfileSection(TEXT("General"), inisection, inisectionlen, inipath);
     readalluchars(&conf.AutoFocus, inisection, General_uchars, ARR_SZ(General_uchars));
+    auto_tile_trace = GetSectionOptionInt(inisection, "AutoTileTrace", 0) == 1;
+    AutoTileOwnedLoad(inipath);
+    if (conf.LinkedGridResize) {
+        linked_trace = GetSectionOptionInt(inisection, "LinkedGridTrace", 0) == 1;
+        linked_trace_offers = 0;
+    }
 
     // [General] consistency checks
     conf.CenterFraction=min(conf.CenterFraction, 100);
@@ -6845,6 +7094,16 @@ __declspec(dllexport) WNDPROC WINAPI Load(HWND mainhwnd, const TCHAR *inipath)
 
     // read and register all shortcuts related options.
     registerAllHotkeys(inipath);
+
+    if (conf.LinkedGridResize) {
+        /* Load may follow Unload without FreeLibrary. Never reuse a token,
+           or clear busy while an old callback is unwinding after reentry. */
+        lg_queue_invalidate(&linked_queue);
+        if (linked_queue.generation != UINTPTR_MAX) linked_queue.closed = 0;
+        linked_queue_hwnd = KreateMsgWin(LinkedQueueProc, TEXT(APP_NAMEA)TEXT("-LinkedQueue"), 0);
+        /* Fail closed: never silently enable legacy resizing after queue failure. */
+        if (!linked_queue_hwnd) linked_queue.closed = 1;
+    }
 
     // Hook mouse if a permanent hook is needed
     if (conf.keepMousehook) {

@@ -1,0 +1,97 @@
+name: Windows x64 portable
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - feat/linked-grid-resize
+      - feat/auto-tile-grid
+      - feat/auto-tile-grid-8
+      - fix/explorer-ctrl-maximize
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fix/explorer-ctrl-maximize' || github.ref == 'refs/heads/feat/linked-grid-resize' || github.ref == 'refs/heads/feat/auto-tile-grid' || github.ref == 'refs/heads/feat/auto-tile-grid-8'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PACKAGE_NAME: AltSnap-win64-portable
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Ubuntu MinGW-w64 packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y gcc-mingw-w64-x86-64-win32 binutils-mingw-w64-x86-64 make zip
+      - name: Run portable tests
+        run: make -C tests test
+      - name: Run ASan and UBSan
+        run: >-
+          make -C tests test BUILD_DIR=../work/linked-grid-sanitized
+          CFLAGS='-O1 -g -std=c99 -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer'
+      - name: Build complete Windows x64 application
+        run: >-
+          make -f MakefileX64 -j2
+          CC=x86_64-w64-mingw32-gcc-win32
+          WR=x86_64-w64-mingw32-windres
+      - name: Build maximize diagnostic
+        run: x86_64-w64-mingw32-gcc-win32 -O2 -std=c99 -Wall -Wextra -Werror -pedantic tests/maximize_diagnostic.c -luser32 -o maximize-diagnostic.exe
+      - name: Build native Windows profile contract tests
+        run: |
+          mkdir -p work/native-profile-tests
+          cp AltSnap.exe work/native-profile-tests/
+          cp maximize-diagnostic.exe work/native-profile-tests/
+          x86_64-w64-mingw32-gcc-win32 -O2 -std=c99 -Wall -Wextra -Werror -pedantic tests/auto_tile_owned_native_test.c -luser32 -o work/native-profile-tests/profile-ansi.exe
+          x86_64-w64-mingw32-gcc-win32 -O2 -std=c99 -Wall -Wextra -Werror -pedantic -D_UNICODE -DUNICODE tests/auto_tile_owned_native_test.c -luser32 -o work/native-profile-tests/profile-unicode.exe
+      - name: Build native Windows shortcut contract tests
+        run: |
+          x86_64-w64-mingw32-gcc-win32 -O2 -std=c99 -Wall -Wextra -Werror -pedantic tests/kb_shortcuts_native_test.c -luser32 -o work/native-profile-tests/shortcuts-ansi.exe
+          x86_64-w64-mingw32-gcc-win32 -O2 -std=c99 -Wall -Wextra -Werror -pedantic -D_UNICODE -DUNICODE tests/kb_shortcuts_native_test.c -luser32 -o work/native-profile-tests/shortcuts-unicode.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: owned-profile-native-tests
+          path: work/native-profile-tests/*.exe
+          retention-days: 1
+          if-no-files-found: error
+      - name: Package and inspect portable ZIP
+        run: tests/package_linked_grid_win64.sh work/portable
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE_NAME }}
+          path: work/portable/${{ env.PACKAGE_NAME }}.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  native-profile-contracts:
+    needs: build
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: owned-profile-native-tests
+          path: native-tests
+      - name: Test actual Windows CryptoAPI and INI contracts
+        shell: pwsh
+        run: |
+          & ./native-tests/profile-ansi.exe
+          if ($LASTEXITCODE -ne 0) { throw "ANSI profile contract failed" }
+          & ./native-tests/profile-unicode.exe
+          if ($LASTEXITCODE -ne 0) { throw "Unicode profile contract failed" }
+      - name: Test actual Windows shortcut and combobox contracts
+        shell: pwsh
+        run: |
+          & ./native-tests/shortcuts-ansi.exe
+          if ($LASTEXITCODE -ne 0) { throw "ANSI shortcut contract failed" }
+          & ./native-tests/shortcuts-unicode.exe
+          if ($LASTEXITCODE -ne 0) { throw "Unicode shortcut contract failed" }
+      - name: Test maximize API smoke contracts
+        shell: pwsh
+        run: |
+          & ./native-tests/maximize-diagnostic.exe --self-test
+          if ($LASTEXITCODE -ne 0) { throw "Maximize smoke test failed" }

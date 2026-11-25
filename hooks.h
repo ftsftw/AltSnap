@@ -98,6 +98,8 @@
 //#define WM_GETZONESLEN    (WM_USER+19)
 #define WM_GETZONES       (WM_USER+20)
 
+#define WM_SHORTCUTERROR    (WM_USER+21)
+
 // List of possible actions
 // ACVALUE(AC_ENUM, IniString, Info)
 #define ACTION_MAP \
@@ -156,7 +158,12 @@
     ACVALUE(AC_ZOOM,         Zoom,         MR) \
     ACVALUE(AC_ZOOM2,        Zoom2,        MR) \
     ACVALUE(AC_NPSTACKED,    NPStacked,    ZO) \
-    ACVALUE(AC_NPSTACKED2,   NPStacked2,   ZO)
+    ACVALUE(AC_NPSTACKED2,   NPStacked2,   ZO) \
+    ACVALUE(AC_AUTOTILEGRID, AutoTileGrid, 00) \
+    ACVALUE(AC_AUTOTILEGRIDSELECTED, AutoTileGridSelected, 00) \
+    ACVALUE(AC_AUTOTILEEXPANDBOTH, AutoTileExpandBoth, 00) \
+    ACVALUE(AC_AUTOTILEEXPANDHORIZONTAL, AutoTileExpandHorizontal, 00) \
+    ACVALUE(AC_AUTOTILEEXPANDVERTICAL, AutoTileExpandVertical, 00)
 
 #define ACVALUE(a, b, c) a,
 enum action { ACTION_MAP AC_MAXVALUE, AC_ORICLICK };
