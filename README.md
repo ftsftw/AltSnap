@@ -1,3 +1,5 @@
+> Current Windows x64 portable build, installation, grid actions and Ctrl+Maximize: [User guide (Russian)](PORTABLE_RU.md). Download `AltSnap-win64-portable.zip` from a successful main Actions run.
+
 English | [中文](./README_zh-CN.md) | [한국어](./README_ko-KR.md)
 # AltSnap
 Fork from Stefan Sundin's AltDrag.

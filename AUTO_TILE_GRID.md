@@ -1,3 +1,5 @@
+> **История разработки и тестирования.** Актуальная установка и назначения: [PORTABLE_RU.md](PORTABLE_RU.md). Инструкции и сочетания ниже относятся к прежним этапам.
+
 > **Current 8-window extension:** AutoTileGrid supports 1–8 eligible windows on the selected monitor. Counts 1–4 retain their previous layouts; 5/6 use three columns and 7/8 use four, in two rows. For 5 and 7 the last bottom cell spans two columns. Nine or more eligible windows cause refusal. Q/E/W expansion still requires an exact four-window 2×2 grid. The historical test reports below describe earlier builds and do not establish Windows GUI validation of this extension.
 
 # AutoTileGrid (experimental MVP)

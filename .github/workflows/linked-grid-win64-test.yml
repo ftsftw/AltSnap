@@ -1,9 +1,10 @@
-name: Grid Windows x64 test ZIP
+name: Windows x64 portable
 
 on:
   workflow_dispatch:
   push:
     branches:
+      - main
       - feat/linked-grid-resize
       - feat/auto-tile-grid
       - feat/auto-tile-grid-8
@@ -14,11 +15,11 @@ permissions:
 
 jobs:
   build:
-    if: github.ref == 'refs/heads/fix/explorer-ctrl-maximize' || github.ref == 'refs/heads/feat/linked-grid-resize' || github.ref == 'refs/heads/feat/auto-tile-grid' || github.ref == 'refs/heads/feat/auto-tile-grid-8'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fix/explorer-ctrl-maximize' || github.ref == 'refs/heads/feat/linked-grid-resize' || github.ref == 'refs/heads/feat/auto-tile-grid' || github.ref == 'refs/heads/feat/auto-tile-grid-8'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      PACKAGE_NAME: ${{ (github.ref == 'refs/heads/feat/auto-tile-grid' || github.ref == 'refs/heads/feat/auto-tile-grid-8') && 'AltSnap-auto-tile-win64-test' || 'AltSnap-linked-grid-win64-test' }}
+      PACKAGE_NAME: AltSnap-win64-portable
     steps:
       - uses: actions/checkout@v4
         with:
