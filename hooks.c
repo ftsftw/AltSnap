@@ -7,6 +7,7 @@
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 #include "hooks.h"
+#include "hotkey_maximize.h"
 
 static void SClickActions(HWND hwnd, action_t action);
 static void MoveWindowAsync(HWND hwnd, int x, int y, int w, int h);
@@ -5144,8 +5145,8 @@ static int xpure DoubleClamp(int ptx, int left, int right, int rwidth)
 }
 /////////////////////////////////////////////////////////////////////////////
 // If we pass buttonX BT_PROBE it will tell us if we pass the blacklist.
-static int init_movement_and_actions_impl(POINT pt, HWND hwnd, action_t action, int buttonX);
-static int init_movement_and_actions(POINT pt, HWND hwnd, action_t action, int buttonX)
+static int init_movement_and_actions_impl(POINT pt, HWND hwnd, action_t action, int buttonX, int ctrlmax);
+static int init_movement_and_actions_mode(POINT pt, HWND hwnd, action_t action, int buttonX, int ctrlmax)
 {
     int ret;
     uintptr_t generation;
@@ -5154,7 +5155,7 @@ static int init_movement_and_actions(POINT pt, HWND hwnd, action_t action, int b
             InterlockedIncrement(&movement_generation);
             g_InFinishMovement = 0;
         }
-        return init_movement_and_actions_impl(pt, hwnd, action, buttonX);
+        return init_movement_and_actions_impl(pt, hwnd, action, buttonX, ctrlmax);
     }
     /* Never wait inside a hook, including reentry from a Win32 API. Probes
        must not overwrite a captured operation's shared state either. */
@@ -5164,12 +5165,16 @@ static int init_movement_and_actions(POINT pt, HWND hwnd, action_t action, int b
     linked_queue.busy = 1;
     if (!HIWORD(buttonX) && action.ac != AC_NONE) lg_queue_invalidate(&linked_queue);
     generation = linked_queue.generation;
-    ret = init_movement_and_actions_impl(pt, hwnd, action, buttonX);
+    ret = init_movement_and_actions_impl(pt, hwnd, action, buttonX, ctrlmax);
     if (!lg_queue_current(&linked_queue, generation)) lg_drag_stop(&linked.drag);
     linked_queue.busy = 0;
     return ret;
 }
-static int init_movement_and_actions_impl(POINT pt, HWND hwnd, action_t action, int buttonX)
+static int init_movement_and_actions(POINT pt, HWND hwnd, action_t action, int buttonX)
+{
+    return init_movement_and_actions_mode(pt, hwnd, action, buttonX, 0);
+}
+static int init_movement_and_actions_impl(POINT pt, HWND hwnd, action_t action, int buttonX, int ctrlmax)
 {
     //RGTICTAC tt; RGTic(&tt);
     LOG("\ninit_movement_and_actions(pt=%d,%d, hwnd=%x, action=%d, button=%d)", pt.x, pt.y, (UINT)(INT_PTR)hwnd, (int)action.ac, buttonX);
@@ -5316,7 +5321,13 @@ static int init_movement_and_actions_impl(POINT pt, HWND hwnd, action_t action, 
         if (state.hittest==2 && button == BT_LMB) return 0;
         state.blockmouseup = 1;
     } else {
-        SClickActions(state.hwnd, action);
+        if (ctrlmax && action.ac == AC_MAXIMIZE) {
+            state.sactiondone = action;
+            LastWin.hwnd = NULL;
+            if (IsResizable(state.hwnd)) HotkeyToggleMaxRestore(state.hwnd);
+        } else {
+            SClickActions(state.hwnd, action);
+        }
         state.blockmouseup = 1; // because the action is done
     }
     // AN ACTION HAS BEEN DONE!!!
@@ -6461,7 +6472,12 @@ LRESULT CALLBACK HooksWinPorc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     //}
                 }
                 state.shift = state.ctrl = 0; // In case...
-                init_movement_and_actions(pt, target_hwnd, action, 0);
+                /* Only registered Maximize shortcuts use the Ctrl workaround.
+                   Keep this per-call so reentry cannot affect mouse/menu actions. */
+                init_movement_and_actions_mode(pt, target_hwnd, action, 0,
+                    HotkeyMaximizeUsesAsync(wParam > 0xC000,
+                        action.ac == AC_MAXIMIZE, LOWORD(lParam),
+                        !!(GetAsyncKeyState(VK_CONTROL) & 0x8000)));
                 state.blockmouseup = 0; // We must not block mouseup in this case...
                 state.ignorept = 0; // Reset...
             }

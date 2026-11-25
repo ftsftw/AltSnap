@@ -14,6 +14,7 @@ PROCESS_VARIANTS := $(addsuffix _test$(EXEEXT),$(PROCESS_VARIANTS))
 
 .PHONY: test build clean
 test: build
+	$(BUILD_DIR)/hotkey_maximize_test$(EXEEXT)
 	python3 shortcut_config_test.py
 	$(SHORTCUTS)
 	$(BIN)
@@ -25,7 +26,7 @@ test: build
 	$(PROCESS_MISSING)
 	set -e; for process_test in $(PROCESS_VARIANTS); do "$$process_test"; done
 
-build: $(SHORTCUTS) $(BIN) $(RECOVERY) $(AUTO_TILE) $(WIN_STUBS) $(AUTO_WIN) $(PROCESS_NAME) $(PROCESS_MISSING) $(PROCESS_VARIANTS)
+build: $(BUILD_DIR)/hotkey_maximize_test$(EXEEXT) $(SHORTCUTS) $(BIN) $(RECOVERY) $(AUTO_TILE) $(WIN_STUBS) $(AUTO_WIN) $(PROCESS_NAME) $(PROCESS_MISSING) $(PROCESS_VARIANTS)
 
 $(BIN): linked_grid_test.c ../linked_grid.c ../linked_grid.h ../linked_grid_queue.h
 	mkdir -p $(BUILD_DIR)
@@ -73,3 +74,7 @@ $(eval $(call process_variant,unicode_psapi_missing,-D_UNICODE -DPROCESS_NAME_MI
 $(SHORTCUTS): kb_shortcuts_test.c ../kb_shortcuts.h
 	mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) kb_shortcuts_test.c $(LDFLAGS) -o $@
+
+$(BUILD_DIR)/hotkey_maximize_test$(EXEEXT): hotkey_maximize_test.c ../hotkey_maximize.h
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LDFLAGS) -o $@
